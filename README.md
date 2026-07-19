@@ -8,14 +8,15 @@ Built for Postgres 15+ / Supabase. Single file, runs top to bottom.
 
 ## What's inside
 
-`ecommerce-schema-full.sql` — 34 tables:
+`ecommerce-schema-full.sql` — 49 tables:
 
-- **Catalog** — products → options → option values → variants (SKUs), variant-pinned images, categories, curated collections
-- **Commerce** — customers, addresses, guest-capable carts, orders with line-item snapshots, payments
-- **Money** — discount codes with redemption tracking, refunds tied to specific gateway payments
-- **Goods** — inventory movement ledger (reservations included), shipments with partial fulfilment and RTO status, RMA returns
+- **Catalog** — products → options → option values → variants (SKUs), variant-pinned images, categories, curated collections, related products / cross-sells, price history
+- **Commerce** — customers, addresses, guest-capable carts, orders with line-item snapshots and UTM attribution, payments
+- **Money & compliance** — discount codes with redemption tracking, refunds tied to specific gateway payments, GST invoices with gap-free numbering and CGST/SGST/IGST breakup, gift cards, store-credit wallet ledger
+- **Goods** — inventory movement ledger (reservations included), shipments with partial fulfilment and RTO status, RMA returns, shipping zones with pincode serviceability and COD surcharge, COD risk blocklist
 - **Trust & engagement** — verified-purchase reviews, wishlists, back-in-stock alerts
 - **Operations** — staff roles, audit log, order event timeline, transactional message outbox (email / SMS / WhatsApp), consent preferences, single-row store settings
+- **Support** — unified ticket inbox (web / email / WhatsApp / phone) with threaded messages, internal notes and SLA timestamps, plus product & bulk enquiries with order-conversion tracking
 
 ## Usage
 

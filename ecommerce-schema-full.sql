@@ -6,9 +6,9 @@
 -- Covers: catalog, customers, cart, orders & payments, staff & audit,
 -- collections, discounts, inventory ledger, fulfilment, returns &
 -- refunds, reviews, wishlist, stock alerts, order timeline,
--- notifications & messaging, GST invoicing, gift cards & store
--- credit, shipping zones & COD risk, cross-sells & price history,
--- settings
+-- notifications & messaging, support tickets & enquiries, GST
+-- invoicing, gift cards & store credit, shipping zones & COD risk,
+-- cross-sells & price history, settings
 -- ============================================================
 
 -- ---------------------------------------------
