@@ -1,26 +1,59 @@
 /**
- * database.types.ts — row types for every table in ecommerce-schema-full.sql.
- * Generated from the DDL, so column names and nullability match exactly.
+ * database.types.ts — row types for every table and view in the schema.
+ *
+ * GENERATED FILE — DO NOT EDIT.
+ * Regenerate with `make types`. It introspects a database built from
+ * supabase/migrations/, so column names and nullability match exactly.
  *
  * Conventions:
  *   - snake_case is kept: it is what Supabase/PostgREST returns over JSON.
  *   - `numeric` -> number (Supabase JSON). If you query with node-postgres
- *     directly, numeric arrives as a string -- adjust there, not here.
+ *     directly, numeric arrives as a string — adjust there, not here.
  *   - `timestamptz` -> string (ISO 8601 over the wire).
- *   - Enum-ish columns use the union types from ./enums. Note that
- *     `supabase gen types` would type them as plain `string`, because the
- *     schema enforces them with CHECK constraints, not Postgres enum types --
- *     this file is what restores type safety on those columns.
+ *   - Enum-ish columns use the union types from ./enums. The schema enforces
+ *     them with CHECK constraints rather than Postgres enum types, so this
+ *     file is what restores type safety on those columns.
+ *   - Columns marked `generated, read-only` are computed by Postgres. Never
+ *     send them on insert or update; the database will reject the write.
  */
 
 import type {
-  ProductStatus, VariantStatus, RelationKind, OrderStatus, PaymentStatus,
-  PaymentProvider, DiscountKind, DiscountAppliesTo, RefundStatus, InvoiceKind,
-  InventoryReason, ShipmentStatus, ReturnStatus, ReturnResolution, ReturnReason,
-  GiftCardStatus, CreditReason, StaffRole, ActorType, OrderEventType,
-  RecipientType, NotificationKind, ReviewStatus, BlocklistKind, MessageChannel,
-  MessageStatus, MessageTemplate, TicketChannel, TicketCategory, TicketStatus,
-  TicketPriority, EnquiryStatus, AuditAction,
+  ActorType,
+  AuditAction,
+  BlocklistKind,
+  CartStatus,
+  CreditReason,
+  DiscountAppliesTo,
+  DiscountKind,
+  EnquiryStatus,
+  GiftCardStatus,
+  IdempotencyScope,
+  InventoryReason,
+  InvoiceKind,
+  MessageChannel,
+  MessageStatus,
+  MessageTemplate,
+  NotificationKind,
+  OrderEventType,
+  OrderStatus,
+  PaymentProvider,
+  PaymentStatus,
+  ProductStatus,
+  RecipientType,
+  RefundStatus,
+  RelationKind,
+  ReturnReason,
+  ReturnResolution,
+  ReturnStatus,
+  ReviewStatus,
+  ShipmentStatus,
+  StaffRole,
+  TicketCategory,
+  TicketChannel,
+  TicketPriority,
+  TicketStatus,
+  VariantStatus,
+  WebhookProvider,
 } from './enums';
 
 /* ---------- Shared JSON shapes ---------- */
@@ -38,33 +71,37 @@ export interface AddressSnapshot {
   [key: string]: unknown;
 }
 
-/** File attached to a ticket message. */
+/** One entry in ticket_messages.attachments. */
 export interface Attachment {
   url: string;
-  name?: string;
-  [key: string]: unknown;
+  name: string;
+  size?: number;
+  content_type?: string;
 }
 
-/** Structured per-variant details, e.g. { chip: "M3", ram_gb: 16 }. */
+/** product_variants.specs — free-form technical attributes. */
 export type VariantSpecs = Record<string, string | number | boolean | null>;
 
-/** audit_logs.changes, e.g. { price: { old: 999, new: 899 } }. */
-export type AuditChanges = Record<string, { old: unknown; new: unknown }>;
+/** audit_logs.changes — only the columns that actually changed. */
+export interface AuditChanges {
+  old?: Record<string, unknown>;
+  new?: Record<string, unknown>;
+}
 
-/* ---------- Table row types (in schema order) ---------- */
+/* ---------- Tables ---------- */
 
-/** Row of `categories` */
 export interface Category {
-  id: string;
+  id: string;  // has default
   parent_id: string | null;
   name: string;
   slug: string;
-  position: number;
+  position: number;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `products` */
 export interface Product {
-  id: string;
+  id: string;  // has default
   category_id: string | null;
   brand: string | null;
   name: string;
@@ -72,77 +109,101 @@ export interface Product {
   description: string | null;
   hsn_code: string | null;
   gst_rate: number | null;
-  status: ProductStatus;
-  created_at: string;
-  updated_at: string;
+  status: ProductStatus;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `product_options` */
 export interface ProductOption {
-  id: string;
+  id: string;  // has default
   product_id: string;
   name: string;
-  position: number;
+  position: number;  // has default
 }
 
-/** Row of `product_option_values` */
 export interface ProductOptionValue {
-  id: string;
+  id: string;  // has default
   option_id: string;
+  product_id: string;
   value: string;
-  position: number;
+  position: number;  // has default
 }
 
-/** Row of `product_variants` */
 export interface ProductVariant {
-  id: string;
+  id: string;  // has default
   product_id: string;
   sku: string;
   title: string | null;
   description: string | null;
-  specs: VariantSpecs;
+  specs: VariantSpecs;  // has default
   price: number;
   compare_at_price: number | null;
   cost_price: number | null;
-  currency: string;
-  stock: number;
+  currency: string;  // has default
+  stock: number;  // has default
+  low_stock_threshold: number;  // has default
   weight_grams: number | null;
   barcode: string | null;
-  is_default: boolean;
-  status: VariantStatus;
+  is_default: boolean;  // has default
+  status: VariantStatus;  // has default
+  is_purchasable: boolean | null;  // generated, read-only
   options_signature: string | null;
-  created_at: string;
-  updated_at: string;
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `variant_option_values` */
 export interface VariantOptionValue {
   variant_id: string;
   option_value_id: string;
+  product_id: string;
 }
 
-/** Row of `product_images` */
 export interface ProductImage {
-  id: string;
+  id: string;  // has default
   product_id: string;
   variant_id: string | null;
   url: string;
   alt_text: string | null;
-  position: number;
+  position: number;  // has default
 }
 
-/** Row of `customers` */
+export interface Collection {
+  id: string;  // has default
+  name: string;
+  slug: string;
+  description: string | null;
+  image_url: string | null;
+  is_active: boolean;  // has default
+  position: number;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
+}
+
+export interface CollectionProduct {
+  collection_id: string;
+  product_id: string;
+  position: number;  // has default
+}
+
+export interface ProductRelation {
+  product_id: string;
+  related_product_id: string;
+  kind: RelationKind;  // has default
+  position: number;  // has default
+}
+
 export interface Customer {
   id: string;
   email: string | null;
   phone: string | null;
   full_name: string | null;
-  created_at: string;
+  anonymized_at: string | null;
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `addresses` */
 export interface Address {
-  id: string;
+  id: string;  // has default
   customer_id: string;
   label: string | null;
   line1: string;
@@ -150,52 +211,78 @@ export interface Address {
   city: string;
   state: string;
   postal_code: string;
-  country: string;
-  is_default: boolean;
+  country: string;  // has default
+  is_default: boolean;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `carts` */
-export interface Cart {
+export interface CommunicationPreference {
+  customer_id: string;
+  order_updates_email: boolean;  // has default
+  order_updates_sms: boolean;  // has default
+  order_updates_whatsapp: boolean;  // has default
+  marketing_email: boolean;  // has default
+  marketing_sms: boolean;  // has default
+  marketing_whatsapp: boolean;  // has default
+  updated_at: string;  // has default
+}
+
+export interface StaffUser {
   id: string;
+  email: string;
+  full_name: string | null;
+  role: StaffRole;  // has default
+  is_active: boolean;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
+}
+
+export interface Cart {
+  id: string;  // has default
   customer_id: string | null;
   session_id: string | null;
-  created_at: string;
-  updated_at: string;
+  status: CartStatus;  // has default
+  converted_order_id: string | null;
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `cart_items` */
 export interface CartItem {
-  id: string;
+  id: string;  // has default
   cart_id: string;
   variant_id: string;
   quantity: number;
+  created_at: string;  // has default
 }
 
-/** Row of `orders` */
 export interface Order {
-  id: string;
-  order_number: string;
+  id: string;  // has default
+  order_number: string;  // has default
   customer_id: string | null;
-  status: OrderStatus;
+  email: string;
+  phone: string | null;
+  status: OrderStatus;  // has default
   subtotal: number;
-  discount_total: number;
-  shipping_total: number;
-  tax_total: number;
+  discount_total: number;  // has default
+  shipping_total: number;  // has default
+  tax_total: number;  // has default
   grand_total: number;
-  currency: string;
+  currency: string;  // has default
   coupon_code: string | null;
   utm_source: string | null;
   utm_medium: string | null;
   utm_campaign: string | null;
   risk_score: number | null;
-  risk_flags: string[];
+  risk_flags: string[];  // has default
   shipping_address: AddressSnapshot;
-  placed_at: string;
+  billing_address: AddressSnapshot | null;
+  placed_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `order_items` */
 export interface OrderItem {
-  id: string;
+  id: string;  // has default
   order_id: string;
   variant_id: string | null;
   product_name: string;
@@ -203,303 +290,138 @@ export interface OrderItem {
   sku: string;
   unit_price: number;
   quantity: number;
-  line_total: number;
+  line_total: number | null;  // generated, read-only
 }
 
-/** Row of `payments` */
 export interface Payment {
-  id: string;
+  id: string;  // has default
   order_id: string;
   provider: PaymentProvider;
   provider_ref: string | null;
   amount: number;
-  status: PaymentStatus;
-  created_at: string;
+  status: PaymentStatus;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `staff_users` */
-export interface StaffUser {
-  id: string;
-  email: string;
-  full_name: string | null;
-  role: StaffRole;
-  is_active: boolean;
-  created_at: string;
-}
-
-/** Row of `audit_logs` */
-export interface AuditLog {
-  id: string;
-  staff_id: string | null;
-  action: AuditAction;
-  table_name: string;
-  record_id: string | null;
-  changes: AuditChanges | null;
-  created_at: string;
-}
-
-/** Row of `collections` */
-export interface Collection {
-  id: string;
-  name: string;
-  slug: string;
-  description: string | null;
-  image_url: string | null;
-  is_active: boolean;
-  position: number;
-}
-
-/** Row of `collection_products` */
-export interface CollectionProduct {
-  collection_id: string;
-  product_id: string;
-  position: number;
-}
-
-/** Row of `discounts` */
-export interface Discount {
-  id: string;
-  code: string;
-  description: string | null;
-  kind: DiscountKind;
-  value: number;
-  min_order_total: number | null;
-  applies_to: DiscountAppliesTo;
-  collection_id: string | null;
-  product_id: string | null;
-  max_uses: number | null;
-  max_uses_per_customer: number | null;
-  starts_at: string;
-  ends_at: string | null;
-  is_active: boolean;
-  created_at: string;
-}
-
-/** Row of `discount_redemptions` */
-export interface DiscountRedemption {
-  id: string;
-  discount_id: string;
-  order_id: string;
-  customer_id: string | null;
-  amount: number;
-  created_at: string;
-}
-
-/** Row of `inventory_movements` */
-export interface InventoryMovement {
-  id: string;
-  variant_id: string;
-  quantity: number;
-  reason: InventoryReason;
-  order_id: string | null;
-  note: string | null;
-  created_by: string | null;
-  created_at: string;
-}
-
-/** Row of `shipments` */
-export interface Shipment {
-  id: string;
-  order_id: string;
-  carrier: string | null;
-  service: string | null;
-  tracking_number: string | null;
-  tracking_url: string | null;
-  status: ShipmentStatus;
-  shipped_at: string | null;
-  delivered_at: string | null;
-  created_at: string;
-}
-
-/** Row of `shipment_items` */
-export interface ShipmentItem {
-  shipment_id: string;
-  order_item_id: string;
-  quantity: number;
-}
-
-/** Row of `return_requests` */
-export interface ReturnRequest {
-  id: string;
-  order_id: string;
-  customer_id: string | null;
-  reason: ReturnReason;
-  status: ReturnStatus;
-  resolution: ReturnResolution | null;
-  note: string | null;
-  created_at: string;
-  resolved_at: string | null;
-}
-
-/** Row of `return_items` */
-export interface ReturnItem {
-  return_id: string;
-  order_item_id: string;
-  quantity: number;
-  condition: string | null;
-}
-
-/** Row of `refunds` */
-export interface Refund {
-  id: string;
-  order_id: string;
-  payment_id: string | null;
-  return_id: string | null;
-  amount: number;
-  provider_ref: string | null;
-  status: RefundStatus;
-  created_at: string;
-}
-
-/** Row of `reviews` */
-export interface Review {
-  id: string;
-  product_id: string;
-  variant_id: string | null;
-  customer_id: string;
-  order_item_id: string | null;
-  rating: number;
-  title: string | null;
-  body: string | null;
-  is_verified: boolean;
-  status: ReviewStatus;
-  created_at: string;
-}
-
-/** Row of `wishlist_items` */
-export interface WishlistItem {
-  customer_id: string;
-  variant_id: string;
-  created_at: string;
-}
-
-/** Row of `stock_alerts` */
-export interface StockAlert {
-  id: string;
-  variant_id: string;
-  customer_id: string | null;
-  email: string | null;
-  notified_at: string | null;
-  created_at: string;
-}
-
-/** Row of `order_events` */
 export interface OrderEvent {
-  id: string;
+  id: string;  // has default
   order_id: string;
   event: OrderEventType;
   from_status: string | null;
   to_status: string | null;
   note: string | null;
-  actor_type: ActorType;
+  actor_type: ActorType;  // has default
   actor_id: string | null;
-  created_at: string;
+  created_at: string;  // has default
 }
 
-/** Row of `notifications` */
-export interface Notification {
-  id: string;
-  recipient_type: RecipientType;
-  recipient_id: string;
-  kind: NotificationKind;
-  title: string;
-  body: string | null;
-  data: Record<string, unknown>;
-  read_at: string | null;
-  created_at: string;
-}
-
-/** Row of `message_log` */
-export interface MessageLog {
-  id: string;
-  customer_id: string | null;
+export interface InventoryMovement {
+  id: string;  // has default
+  variant_id: string;
+  quantity: number;
+  reason: InventoryReason;
   order_id: string | null;
-  channel: MessageChannel;
-  template: MessageTemplate;
-  recipient: string;
-  payload: Record<string, unknown> | null;
-  status: MessageStatus;
-  provider: string | null;
-  provider_ref: string | null;
-  error: string | null;
-  created_at: string;
-  sent_at: string | null;
+  expires_at: string | null;
+  reservation_id: string | null;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;  // has default
 }
 
-/** Row of `communication_preferences` */
-export interface CommunicationPreferences {
-  customer_id: string;
-  order_updates_email: boolean;
-  order_updates_sms: boolean;
-  order_updates_whatsapp: boolean;
-  marketing_email: boolean;
-  marketing_sms: boolean;
-  marketing_whatsapp: boolean;
-  updated_at: string;
+export interface Shipment {
+  id: string;  // has default
+  order_id: string;
+  carrier: string | null;
+  service: string | null;
+  tracking_number: string | null;
+  tracking_url: string | null;
+  status: ShipmentStatus;  // has default
+  shipped_at: string | null;
+  delivered_at: string | null;
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `support_tickets` */
-export interface SupportTicket {
-  id: string;
-  ticket_number: string;
+export interface ShipmentItem {
+  shipment_id: string;
+  order_item_id: string;
+  order_id: string;
+  quantity: number;
+}
+
+export interface ReturnRequest {
+  id: string;  // has default
+  order_id: string;
   customer_id: string | null;
-  order_id: string | null;
-  channel: TicketChannel;
-  category: TicketCategory;
-  subject: string;
-  status: TicketStatus;
-  priority: TicketPriority;
-  assigned_to: string | null;
-  guest_name: string | null;
-  guest_email: string | null;
-  guest_phone: string | null;
-  first_response_at: string | null;
+  reason: ReturnReason;
+  status: ReturnStatus;  // has default
+  resolution: ReturnResolution | null;
+  note: string | null;
+  created_at: string;  // has default
+  updated_at: string;  // has default
   resolved_at: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
-/** Row of `ticket_messages` */
-export interface TicketMessage {
-  id: string;
-  ticket_id: string;
-  sender_type: ActorType;
-  sender_id: string | null;
-  body: string;
-  is_internal: boolean;
-  attachments: Attachment[];
-  created_at: string;
+export interface ReturnItem {
+  return_id: string;
+  order_item_id: string;
+  order_id: string;
+  quantity: number;
+  condition: string | null;
 }
 
-/** Row of `product_enquiries` */
-export interface ProductEnquiry {
-  id: string;
+export interface Refund {
+  id: string;  // has default
+  order_id: string;
+  payment_id: string | null;
+  return_id: string | null;
+  amount: number;
+  provider_ref: string | null;
+  status: RefundStatus;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
+}
+
+export interface Discount {
+  id: string;  // has default
+  code: string;
+  description: string | null;
+  kind: DiscountKind;
+  value: number;  // has default
+  min_order_total: number | null;
+  applies_to: DiscountAppliesTo;  // has default
+  collection_id: string | null;
   product_id: string | null;
-  variant_id: string | null;
-  customer_id: string | null;
-  guest_name: string | null;
-  guest_email: string | null;
-  guest_phone: string | null;
-  quantity: number | null;
-  message: string;
-  status: EnquiryStatus;
-  assigned_to: string | null;
-  converted_order_id: string | null;
-  created_at: string;
+  max_uses: number | null;
+  max_uses_per_customer: number | null;  // has default
+  used_count: number;  // has default
+  starts_at: string;  // has default
+  ends_at: string | null;
+  is_active: boolean;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `invoice_sequences` */
+export interface DiscountRedemption {
+  id: string;  // has default
+  discount_id: string;
+  order_id: string;
+  customer_id: string | null;
+  amount: number;
+  created_at: string;  // has default
+}
+
 export interface InvoiceSequence {
   fy: string;
-  last_number: number;
+  last_number: number;  // has default
 }
 
-/** Row of `invoices` */
 export interface Invoice {
-  id: string;
+  id: string;  // has default
   invoice_number: string;
   order_id: string;
-  kind: InvoiceKind;
+  kind: InvoiceKind;  // has default
   parent_invoice_id: string | null;
   customer_name: string;
   customer_gstin: string | null;
@@ -507,17 +429,20 @@ export interface Invoice {
   seller_gstin: string;
   place_of_supply: string;
   taxable_value: number;
-  cgst_total: number;
-  sgst_total: number;
-  igst_total: number;
+  cgst_total: number;  // has default
+  sgst_total: number;  // has default
+  igst_total: number;  // has default
   grand_total: number;
   pdf_url: string | null;
-  issued_at: string;
+  irn: string | null;
+  ack_no: string | null;
+  ack_date: string | null;
+  signed_qr: string | null;
+  issued_at: string;  // has default
 }
 
-/** Row of `invoice_lines` */
 export interface InvoiceLine {
-  id: string;
+  id: string;  // has default
   invoice_id: string;
   description: string;
   hsn_code: string | null;
@@ -525,41 +450,40 @@ export interface InvoiceLine {
   unit_price: number;
   taxable_value: number;
   gst_rate: number;
-  cgst_amount: number;
-  sgst_amount: number;
-  igst_amount: number;
+  cgst_amount: number;  // has default
+  sgst_amount: number;  // has default
+  igst_amount: number;  // has default
   line_total: number;
 }
 
-/** Row of `gift_cards` */
 export interface GiftCard {
-  id: string;
-  code: string;
+  id: string;  // has default
+  code_hash: string;
+  last4: string;
   initial_balance: number;
   balance: number;
-  currency: string;
+  currency: string;  // has default
   purchaser_id: string | null;
   purchase_order_id: string | null;
   recipient_email: string | null;
   message: string | null;
-  status: GiftCardStatus;
+  status: GiftCardStatus;  // has default
   expires_at: string | null;
-  created_at: string;
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `gift_card_transactions` */
 export interface GiftCardTransaction {
-  id: string;
+  id: string;  // has default
   gift_card_id: string;
   order_id: string | null;
   delta: number;
   balance_after: number;
-  created_at: string;
+  created_at: string;  // has default
 }
 
-/** Row of `credit_ledger` */
 export interface CreditLedgerEntry {
-  id: string;
+  id: string;  // has default
   customer_id: string;
   delta: number;
   reason: CreditReason;
@@ -569,81 +493,248 @@ export interface CreditLedgerEntry {
   expires_at: string | null;
   note: string | null;
   created_by: string | null;
-  created_at: string;
+  created_at: string;  // has default
 }
 
-/** Row of `shipping_zones` */
 export interface ShippingZone {
-  id: string;
+  id: string;  // has default
   name: string;
-  position: number;
+  position: number;  // has default
 }
 
-/** Row of `serviceable_pincodes` */
 export interface ServiceablePincode {
   pincode: string;
   zone_id: string | null;
-  cod_allowed: boolean;
+  cod_allowed: boolean;  // has default
   courier: string | null;
-  updated_at: string;
+  updated_at: string;  // has default
 }
 
-/** Row of `shipping_rates` */
 export interface ShippingRate {
-  id: string;
+  id: string;  // has default
   zone_id: string;
-  min_weight_grams: number;
+  min_weight_grams: number;  // has default
   max_weight_grams: number | null;
-  min_order_total: number;
+  min_order_total: number;  // has default
+  max_order_total: number | null;
   rate: number;
-  cod_surcharge: number;
+  cod_surcharge: number;  // has default
   delivery_days: number | null;
-  is_active: boolean;
+  is_active: boolean;  // has default
 }
 
-/** Row of `blocklist` */
 export interface BlocklistEntry {
-  id: string;
+  id: string;  // has default
   kind: BlocklistKind;
   value: string;
   reason: string | null;
   added_by: string | null;
   expires_at: string | null;
-  created_at: string;
+  created_at: string;  // has default
 }
 
-/** Row of `product_relations` */
-export interface ProductRelation {
+export interface Review {
+  id: string;  // has default
   product_id: string;
-  related_product_id: string;
-  kind: RelationKind;
-  position: number;
+  variant_id: string | null;
+  customer_id: string;
+  order_item_id: string | null;
+  rating: number;
+  title: string | null;
+  body: string | null;
+  is_verified: boolean | null;  // generated, read-only
+  status: ReviewStatus;  // has default
+  created_at: string;  // has default
+  updated_at: string;  // has default
 }
 
-/** Row of `price_history` */
+export interface WishlistItem {
+  customer_id: string;
+  variant_id: string;
+  created_at: string;  // has default
+}
+
+export interface StockAlert {
+  id: string;  // has default
+  variant_id: string;
+  customer_id: string | null;
+  email: string | null;
+  notified_at: string | null;
+  created_at: string;  // has default
+}
+
 export interface PriceHistoryEntry {
-  id: string;
+  id: string;  // has default
   variant_id: string;
   old_price: number | null;
   new_price: number;
   changed_by: string | null;
-  created_at: string;
+  created_at: string;  // has default
 }
 
-/** Row of `store_settings` */
+export interface Notification {
+  id: string;  // has default
+  recipient_type: RecipientType;
+  recipient_id: string;
+  kind: NotificationKind;
+  title: string;
+  body: string | null;
+  data: Record<string, unknown>;  // has default
+  read_at: string | null;
+  created_at: string;  // has default
+}
+
+export interface MessageLogEntry {
+  id: string;  // has default
+  customer_id: string | null;
+  order_id: string | null;
+  channel: MessageChannel;
+  template: MessageTemplate;
+  recipient: string;
+  payload: Record<string, unknown> | null;
+  status: MessageStatus;  // has default
+  provider: string | null;
+  provider_ref: string | null;
+  error: string | null;
+  attempts: number;  // has default
+  created_at: string;  // has default
+  sent_at: string | null;
+}
+
+export interface SupportTicket {
+  id: string;  // has default
+  ticket_number: string;  // has default
+  customer_id: string | null;
+  order_id: string | null;
+  channel: TicketChannel;  // has default
+  category: TicketCategory;  // has default
+  subject: string;
+  status: TicketStatus;  // has default
+  priority: TicketPriority;  // has default
+  assigned_to: string | null;
+  guest_name: string | null;
+  guest_email: string | null;
+  guest_phone: string | null;
+  first_response_at: string | null;
+  resolved_at: string | null;
+  created_at: string;  // has default
+  updated_at: string;  // has default
+}
+
+export interface TicketMessage {
+  id: string;  // has default
+  ticket_id: string;
+  sender_type: ActorType;
+  sender_id: string | null;
+  body: string;
+  is_internal: boolean;  // has default
+  attachments: Attachment[];  // has default
+  created_at: string;  // has default
+}
+
+export interface ProductEnquiry {
+  id: string;  // has default
+  product_id: string | null;
+  variant_id: string | null;
+  customer_id: string | null;
+  guest_name: string | null;
+  guest_email: string | null;
+  guest_phone: string | null;
+  quantity: number | null;
+  message: string;
+  status: EnquiryStatus;  // has default
+  assigned_to: string | null;
+  converted_order_id: string | null;
+  created_at: string;  // has default
+  updated_at: string;  // has default
+}
+
+export interface AuditLog {
+  id: string;  // has default
+  staff_id: string | null;
+  actor_uid: string | null;
+  action: AuditAction;
+  table_name: string;
+  record_id: string | null;
+  changes: AuditChanges | null;
+  created_at: string;  // has default
+}
+
 export interface StoreSettings {
-  id: number;
-  store_name: string;
+  id: number;  // has default
+  store_name: string;  // has default
+  support_email: string | null;
+  support_phone: string | null;
+  seller_gstin: string | null;
+  seller_state_code: string | null;
+  free_shipping_above: number | null;
+  flat_shipping_rate: number | null;  // has default
+  cod_enabled: boolean;  // has default
+  config: Record<string, unknown>;  // has default
+  updated_at: string;  // has default
+}
+
+export interface IdempotencyKey {
+  key: string;
+  scope: IdempotencyScope;
+  request_hash: string;
+  customer_id: string | null;
+  response_status: number | null;
+  response_body: Record<string, unknown> | null;
+  locked_at: string | null;
+  completed_at: string | null;
+  created_at: string;  // has default
+  expires_at: string;  // has default
+}
+
+export interface WebhookEvent {
+  id: string;  // has default
+  provider: WebhookProvider;
+  event_id: string;
+  event_type: string | null;
+  payload: Record<string, unknown>;
+  signature_verified: boolean;  // has default
+  received_at: string;  // has default
+  processed_at: string | null;
+  attempts: number;  // has default
+  error: string | null;
+}
+
+/* ---------- Views ---------- */
+
+export interface StorefrontVariant {
+  id: string | null;
+  product_id: string | null;
+  sku: string | null;
+  title: string | null;
+  description: string | null;
+  specs: VariantSpecs | null;
+  price: number | null;
+  compare_at_price: number | null;
+  currency: string | null;
+  stock: number | null;
+  weight_grams: number | null;
+  is_default: boolean | null;
+  status: VariantStatus | null;
+  is_purchasable: boolean | null;
+  created_at: string | null;
+}
+
+export interface PublicSettings {
+  store_name: string | null;
   support_email: string | null;
   support_phone: string | null;
   free_shipping_above: number | null;
   flat_shipping_rate: number | null;
-  cod_enabled: boolean;
-  config: Record<string, unknown>;
-  updated_at: string;
+  cod_enabled: boolean | null;
 }
 
-/* ---------- Table registry (for generic helpers) ---------- */
+export interface CustomerCreditBalance {
+  customer_id: string | null;
+  balance: number | null;
+}
+
+/* ---------- Name -> row type, for generic helpers ---------- */
 
 export interface Tables {
   categories: Category;
@@ -653,35 +744,27 @@ export interface Tables {
   product_variants: ProductVariant;
   variant_option_values: VariantOptionValue;
   product_images: ProductImage;
+  collections: Collection;
+  collection_products: CollectionProduct;
+  product_relations: ProductRelation;
   customers: Customer;
   addresses: Address;
+  communication_preferences: CommunicationPreference;
+  staff_users: StaffUser;
   carts: Cart;
   cart_items: CartItem;
   orders: Order;
   order_items: OrderItem;
   payments: Payment;
-  staff_users: StaffUser;
-  audit_logs: AuditLog;
-  collections: Collection;
-  collection_products: CollectionProduct;
-  discounts: Discount;
-  discount_redemptions: DiscountRedemption;
+  order_events: OrderEvent;
   inventory_movements: InventoryMovement;
   shipments: Shipment;
   shipment_items: ShipmentItem;
   return_requests: ReturnRequest;
   return_items: ReturnItem;
   refunds: Refund;
-  reviews: Review;
-  wishlist_items: WishlistItem;
-  stock_alerts: StockAlert;
-  order_events: OrderEvent;
-  notifications: Notification;
-  message_log: MessageLog;
-  communication_preferences: CommunicationPreferences;
-  support_tickets: SupportTicket;
-  ticket_messages: TicketMessage;
-  product_enquiries: ProductEnquiry;
+  discounts: Discount;
+  discount_redemptions: DiscountRedemption;
   invoice_sequences: InvoiceSequence;
   invoices: Invoice;
   invoice_lines: InvoiceLine;
@@ -692,42 +775,23 @@ export interface Tables {
   serviceable_pincodes: ServiceablePincode;
   shipping_rates: ShippingRate;
   blocklist: BlocklistEntry;
-  product_relations: ProductRelation;
+  reviews: Review;
+  wishlist_items: WishlistItem;
+  stock_alerts: StockAlert;
   price_history: PriceHistoryEntry;
+  notifications: Notification;
+  message_log: MessageLogEntry;
+  support_tickets: SupportTicket;
+  ticket_messages: TicketMessage;
+  product_enquiries: ProductEnquiry;
+  audit_logs: AuditLog;
   store_settings: StoreSettings;
+  idempotency_keys: IdempotencyKey;
+  webhook_events: WebhookEvent;
+  storefront_variants: StorefrontVariant;
+  public_settings: PublicSettings;
+  customer_credit_balances: CustomerCreditBalance;
 }
 
 export type TableName = keyof Tables;
-
-/* ---------- Common composed shapes (typical joined queries) ---------- */
-
-export interface ProductOptionWithValues extends ProductOption {
-  values: ProductOptionValue[];
-}
-
-export interface VariantWithOptionValues extends ProductVariant {
-  option_value_ids: string[];
-}
-
-/** Everything a product page needs. */
-export interface ProductWithDetails extends Product {
-  options: ProductOptionWithValues[];
-  variants: VariantWithOptionValues[];
-  images: ProductImage[];
-}
-
-export interface CartItemWithVariant extends CartItem {
-  variant: ProductVariant & { product: Pick<Product, 'name' | 'slug'> };
-}
-
-/** Everything the order detail / tracking page needs. */
-export interface OrderWithDetails extends Order {
-  items: OrderItem[];
-  payments: Payment[];
-  shipments: Shipment[];
-  events: OrderEvent[];
-}
-
-export interface TicketWithMessages extends SupportTicket {
-  messages: TicketMessage[];
-}
+export type Row<T extends TableName> = Tables[T];

@@ -33,10 +33,22 @@ export const pincode = z
   .regex(/^[1-9][0-9]{5}$/, 'Enter a valid 6-digit PIN code');
 
 /** Indian mobile with optional +91; normalises to bare 10 digits. */
+/**
+ * Mobile number, accepted loosely and stored strictly.
+ *
+ * Accepts what people actually type ('9876543210', '+91 98765 43210') and
+ * normalises to E.164 ('+919876543210'), because that is what the database
+ * now requires — customers.phone and orders.phone both carry a CHECK for it.
+ *
+ * This transform used to STRIP the +91, which would now be rejected on every
+ * insert. It also silently broke the COD blocklist: an entry holding
+ * '9876543210' while checkout looks up '+919876543210' blocks nobody, and the
+ * only place you find out is the courier bill.
+ */
 export const phone = z
   .string()
-  .regex(/^(\+91[\s-]?)?[6-9]\d{9}$/, 'Enter a valid mobile number')
-  .transform((v) => v.replace(/^\+91[\s-]?/, ''));
+  .regex(/^(\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}$/, 'Enter a valid mobile number')
+  .transform((v) => '+91' + v.replace(/^\+91/, '').replace(/[\s-]/g, ''));
 
 export const money = z.number().nonnegative().finite();
 export const qty = z.number().int().positive();
@@ -206,6 +218,7 @@ export const variantAdminSchema = z
     weight_grams: z.number().int().positive().optional(),
     barcode: z.string().max(64).optional(),
     is_default: z.boolean().optional(),
+    low_stock_threshold: z.number().int().nonnegative().optional(),
   })
   .refine(
     (v) => v.compare_at_price === undefined || v.compare_at_price >= v.price,

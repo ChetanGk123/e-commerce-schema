@@ -89,12 +89,12 @@ verify-bundle: bundle down
 		&& echo "==> all invariants hold" \
 		|| { echo "==> INVARIANT FAILURE"; exit 1; }
 
-# Hand-written types drift. Regenerate against a running database
-# rather than editing types/database.types.ts by hand.
-types:
-	@command -v supabase >/dev/null || { echo "supabase CLI not installed"; exit 1; }
-	supabase gen types typescript --local > types/database.types.ts
-	@echo "==> types/database.types.ts regenerated"
+# Hand-written types drift. This introspects a database built from the
+# migrations, so nullability and column names cannot disagree with what
+# actually ships. types/enums.ts and types/validation.ts stay hand-written --
+# CHECK constraints are not Postgres enum types, so they cannot be derived.
+types: verify
+	@python3 scripts/gen_types.py
 
 # Cheap static checks for the mistakes that are expensive in production.
 lint:

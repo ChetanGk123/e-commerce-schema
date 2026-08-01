@@ -1,11 +1,11 @@
 /**
- * enums.ts — every enum in ecommerce-schema-full.sql, ready for the frontend.
+ * enums.ts — every enum in supabase/migrations/, ready for the frontend.
  *
  * Pattern: `as const` arrays + derived literal-union types.
  *   - Iterate the arrays to render <select> options, filter chips, and tabs.
  *   - Use the types on props, state, and API payloads for compile-time safety.
  *
- * Section 1 mirrors the database CHECK constraints exactly (28 columns) —
+ * Section 1 mirrors the database CHECK constraints exactly (29 columns) —
  * if a value changes here, it must change in the schema too, and vice versa.
  * Section 2 covers free-text columns with conventional values: the database
  * does not enforce these, so their types also accept any other string.
@@ -22,9 +22,19 @@
 export const PRODUCT_STATUSES = ['draft', 'active', 'archived'] as const;
 export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
 
-/** product_variants.status */
-export const VARIANT_STATUSES = ['active', 'out_of_stock', 'archived'] as const;
+/**
+ * product_variants.status
+ *
+ * 'out_of_stock' was REMOVED. It duplicated `stock = 0` with nothing keeping
+ * the two in sync, so they drifted. Availability is now derived: read the
+ * generated `is_purchasable` column instead of comparing status to a string.
+ */
+export const VARIANT_STATUSES = ['active', 'archived'] as const;
 export type VariantStatus = (typeof VARIANT_STATUSES)[number];
+
+/** carts.status */
+export const CART_STATUSES = ['active', 'converted', 'abandoned'] as const;
+export type CartStatus = (typeof CART_STATUSES)[number];
 
 /** product_relations.kind */
 export const RELATION_KINDS = ['related', 'upsell', 'cross_sell', 'accessory'] as const;
@@ -239,9 +249,23 @@ export const ORDER_EVENT_TYPES = [
 ] as const;
 export type OrderEventType = (typeof ORDER_EVENT_TYPES)[number] | (string & {});
 
-/** audit_logs.action */
-export const AUDIT_ACTIONS = ['create', 'update', 'delete', 'price_change'] as const;
+/**
+ * audit_logs.action
+ *
+ * These are now written by the audit_row() trigger as lower(TG_OP), so the
+ * values are exactly Postgres's operation names. The previous 'create' and
+ * 'price_change' never appear.
+ */
+export const AUDIT_ACTIONS = ['insert', 'update', 'delete'] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number] | (string & {});
+
+/** idempotency_keys.scope */
+export const IDEMPOTENCY_SCOPES = ['checkout', 'refund', 'gift_card_redeem'] as const;
+export type IdempotencyScope = (typeof IDEMPOTENCY_SCOPES)[number] | (string & {});
+
+/** webhook_events.provider */
+export const WEBHOOK_PROVIDERS = ['razorpay', 'delhivery', 'shiprocket', 'resend', 'msg91'] as const;
+export type WebhookProvider = (typeof WEBHOOK_PROVIDERS)[number] | (string & {});
 
 /** return_requests.reason */
 export const RETURN_REASONS = [
