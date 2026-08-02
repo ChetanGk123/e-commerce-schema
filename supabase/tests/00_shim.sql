@@ -9,10 +9,19 @@
 
 create schema if not exists auth;
 
+-- Mirrors the columns migration 0011's signup trigger reads. phone is
+-- deliberately typed as bare text because that is how Supabase stores it:
+-- '919876543210', with no '+'. The trigger has to add one, and this shim
+-- would hide that bug if it stored E.164.
 create table if not exists auth.users (
-  id    uuid primary key,
-  email text
+  id                  uuid primary key,
+  email               text,
+  phone               text,
+  raw_user_meta_data  jsonb
 );
+
+alter table auth.users add column if not exists phone text;
+alter table auth.users add column if not exists raw_user_meta_data jsonb;
 
 -- Supabase derives this from the request JWT. Here it reads a GUC so
 -- tests can impersonate a user with:

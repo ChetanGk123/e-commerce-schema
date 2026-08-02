@@ -14,7 +14,7 @@ settings, scheduled jobs, keys.
 
 ```sh
 make verify   # apply every migration to a throwaway Postgres container
-make test     # verify, then assert all 37 invariants
+make test     # verify, then assert all 38 invariants
 make seed     # verify, then load demo catalog + shipping data
 make lint     # check for unpinned search_path, missing transactions
 ```
@@ -61,11 +61,12 @@ supabase/
     ..._triggers        the invariants: oversell guard, append-only, numbering
     ..._indexes         access paths
     ..._views_rls_grants  storefront views + Row Level Security
+    ..._auth_signup     auth.users -> customers on signup (Supabase only)
   jobs/retention.sql    scheduled sweepers (NOT a migration)
   seed.sql              demo data
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
-    01_invariants.sql   37 assertions
+    01_invariants.sql   38 assertions
 types/                  TypeScript types — regenerate with `make types`
 ```
 

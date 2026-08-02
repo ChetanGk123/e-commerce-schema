@@ -253,7 +253,7 @@ These are new, and they exist because of the two ways money goes wrong at the ed
 
 6. **The database enforces its own rules.** This is the one that changed most. A rule written only in the application's code is a rule that holds until someone writes a second program, runs a quick fix by hand, or clicks something unexpected in an admin panel. So the rules that cost money now live in the database itself: stock cannot go negative, a coupon cannot exceed its limit, a permanent register cannot be edited by anyone at all — not staff, not the admin dashboard, not a script with full access. The point of putting a rule here rather than in code is that it then applies to programs nobody has written yet.
 
-These rules are tested rather than asserted. Running `make test` performs thirty-seven checks that each *try* to break one of them — overselling, reusing a spent coupon, editing an invoice, publishing an unapproved review — and confirms the database says no.
+These rules are tested rather than asserted. Running `make test` performs thirty-eight checks that each *try* to break one of them — overselling, reusing a spent coupon, editing an invoice, publishing an unapproved review — and confirms the database says no.
 
 ---
 
@@ -269,7 +269,7 @@ The recurring theme: this database refuses things. That is the point of it, but 
 
 ```sh
 make verify    # apply every migration to a throwaway container
-make test      # then run the 37 invariant checks
+make test      # then run the 38 invariant checks
 make seed      # then load a demo catalogue
 make psql      # open a shell on it
 ```

@@ -91,9 +91,16 @@ select id, email, role, is_active from staff_users;
 
 ### Step 4. Create `customers` rows on signup
 
-Supabase Auth creates `auth.users`. Nothing creates the matching `customers`
-row, so without this a shopper can sign up and then find they cannot read
-their own orders — `id = auth.uid()` matches nothing.
+Supabase Auth creates `auth.users`. Something has to create the matching
+`customers` row, or a shopper can sign up and then find they cannot read their
+own orders — `id = auth.uid()` matches nothing.
+
+**Migration `0011_auth_signup` does this for you.** If you applied a current
+`dist/schema.sql` or ran `supabase db push`, it is already installed — skip to
+the check below.
+
+Only paste the following if your project predates that migration (you ran an
+earlier bundle). It is the same code, and it is safe to run twice:
 
 ```sql
 create or replace function handle_new_user()
@@ -126,6 +133,7 @@ begin
   return new;
 end $$;
 
+drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function handle_new_user();
@@ -327,7 +335,7 @@ session's user id.
 To check the whole thing works before you trust it:
 
 ```sh
-make test      # applies every migration, then 37 invariant assertions
+make test      # applies every migration, then 38 invariant assertions
 ```
 
 ---

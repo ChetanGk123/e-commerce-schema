@@ -40,17 +40,45 @@ begin;
 -- Fixtures
 -- ------------------------------------------------------------
 
-insert into auth.users (id, email) values
-  ('a0000000-0000-4000-8000-000000000001', 'buyer@example.com'),
-  ('a0000000-0000-4000-8000-000000000002', 'other@example.com'),
-  ('b0000000-0000-4000-8000-000000000001', 'staff@example.com');
-
-insert into customers (id, email) values
-  ('a0000000-0000-4000-8000-000000000001', 'buyer@example.com'),
-  ('a0000000-0000-4000-8000-000000000002', 'other@example.com');
+-- Signing up an auth user now creates the customers row and its consent
+-- defaults, via the trigger from migration 0011 -- so there is deliberately
+-- no explicit `insert into customers` here. The bare phone on the first
+-- user is exactly how Supabase stores it; the trigger has to make it E.164.
+insert into auth.users (id, email, phone, raw_user_meta_data) values
+  ('a0000000-0000-4000-8000-000000000001', 'buyer@example.com',
+   '919876543210', '{"full_name":"Priya S"}'::jsonb),
+  ('a0000000-0000-4000-8000-000000000002', 'other@example.com', null, null),
+  ('b0000000-0000-4000-8000-000000000001', 'staff@example.com', null, null);
 
 insert into staff_users (id, email, role) values
   ('b0000000-0000-4000-8000-000000000001', 'staff@example.com', 'warehouse');
+
+do $$
+declare p text; nm text; n int;
+begin
+  select phone, full_name into p, nm from customers
+  where id = 'a0000000-0000-4000-8000-000000000001';
+
+  if p is distinct from '+919876543210' then
+    raise exception
+      'FAIL  signup trigger did not normalise phone to E.164 (got %)', p;
+  end if;
+  if nm is distinct from 'Priya S' then
+    raise exception 'FAIL  signup trigger did not carry full_name (got %)', nm;
+  end if;
+
+  select count(*) into n from customers;
+  if n <> 3 then
+    raise exception 'FAIL  signup trigger created % customer rows, expected 3', n;
+  end if;
+
+  select count(*) into n from communication_preferences;
+  if n <> 3 then
+    raise exception 'FAIL  consent defaults created for % of 3 signups', n;
+  end if;
+
+  raise notice 'PASS  signup trigger creates customer + consent, phone normalised to E.164';
+end $$;
 
 insert into products (id, name, slug, status) values
   ('c0000000-0000-4000-8000-000000000001', 'Test Laptop', 'test-laptop', 'active'),
