@@ -8,6 +8,10 @@ Built for Postgres 15+ / Supabase. 51 tables, applied as ordered migrations.
 
 ## Quick start
 
+Setting up a real project? **[docs/setup.md](docs/setup.md)** is the
+step-by-step runbook — schema, first staff user, signup wiring, store
+settings, scheduled jobs, keys.
+
 ```sh
 make verify   # apply every migration to a throwaway Postgres container
 make test     # verify, then assert all 37 invariants
