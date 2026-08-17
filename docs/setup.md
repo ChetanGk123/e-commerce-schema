@@ -7,8 +7,13 @@ silent, and finding them now costs a minute rather than a weekend.
 
 - [Part A — Supabase (hosted)](#part-a--supabase-hosted)
 - [Part B — plain Postgres](#part-b--plain-postgres)
+- [Part C — self-hosted Supabase (Dokploy)](#part-c--self-hosted-supabase-dokploy)
 - [Troubleshooting](#troubleshooting)
 - [Before you take real orders](#before-you-take-real-orders)
+
+> **Self-hosting?** Go to **Part C**. Part A assumes the hosted Dashboard; Part B assumes
+> there is no `auth` schema at all, which is wrong for self-hosted Supabase — it has one,
+> so the identity foreign keys apply and Part B would mislead you.
 
 ---
 
@@ -340,6 +345,115 @@ make test      # applies every migration, then 38 invariant assertions
 
 ---
 
+## Part C — self-hosted Supabase (Dokploy)
+
+Self-hosted Supabase **has** an `auth` schema, so the identity contract works exactly as in
+Part A. What changes is everything around the database: no Dashboard conveniences, no
+managed backups, and two different URLs for the same Supabase.
+
+Deployed from the `supabase-db` blueprint in
+[`ChetanGk123/dokploy-templates`](https://github.com/ChetanGk123/dokploy-templates) — the
+official Dokploy template with `kong` joined to the external `dokploy-network`.
+`template.toml` generates the domains, JWT secret, anon/service keys and passwords.
+
+### C1. Apply the schema
+
+There is no linked project, so `supabase db push` does not apply. Use the bundle:
+
+```sh
+make bundle
+psql "$DATABASE_URL" -f dist/schema.sql
+```
+
+`$DATABASE_URL` points at the `db` service — from another container on
+`dokploy-network`, or through a temporary port forward from your machine.
+
+**Check** — expect **51**:
+
+```sql
+select count(*) as tables from pg_tables where schemaname = 'public';
+```
+
+### C2. Confirm the identity link
+
+Same check as Step 2, and it matters just as much here:
+
+```sql
+select conname from pg_constraint
+where conname in ('customers_id_fkey', 'staff_users_id_fkey');
+```
+
+Expect **2 rows**. Zero means the schema ran before `auth.users` existed — apply it again
+after the auth container has started once.
+
+### C3. Two URLs, and which goes where
+
+The single most common self-hosting mistake. Same Supabase, two addresses:
+
+| Caller | URL | Notes |
+|---|---|---|
+| Your API / server containers | `http://kong:8000` | internal `dokploy-network`, no TLS, no egress |
+| Browsers (Auth, Realtime) | `https://supabase.<your-domain>` | Traefik + TLS |
+
+Getting these backwards produces failures that read like bad credentials.
+
+### C4. pg_cron — verify, do not assume
+
+The sweepers in `supabase/jobs/retention.sql` need pg_cron, and a self-hosted image does
+not guarantee it is loaded.
+
+```sql
+show shared_preload_libraries;          -- must include pg_cron
+create extension if not exists pg_cron;
+```
+
+Then load the jobs and schedule them exactly as in [Step 7](#step-7-scheduled-jobs).
+
+If pg_cron is unavailable, call the same functions on an interval from a long-lived
+service instead. Do not skip this: without `release_expired_reservations()`, a checkout
+abandoned at the wrong moment holds a unit of stock hostage forever, and nothing else in
+the system will notice.
+
+**Check:**
+
+```sql
+select jobname, schedule, active from cron.job order by jobname;
+```
+
+### C5. Backups — this is now yours
+
+**PITR does not exist here.** This database holds GST invoices you are required to retain
+and a `credit_ledger` that is money you owe customers. Nothing is backing it up by default.
+
+At minimum:
+
+1. A scheduled `pg_dump` to off-host storage (Dokploy can schedule database backups to S3).
+2. **A restore, actually rehearsed into a scratch database.** An untested backup is not a
+   backup.
+3. If Storage keeps product images on a local volume rather than an S3-compatible backend,
+   that volume needs backing up too — it is not in the `pg_dump`.
+
+For real point-in-time recovery rather than nightly snapshots, run WAL-G or pgBackRest
+against the Postgres container.
+
+### C6. What you lose, and the substitutes
+
+| Hosted feature | Substitute |
+|---|---|
+| Security / Performance Advisors ([Step 10](#step-10-security-and-durability)) | `make lint` — already in this repo; covers unpinned `search_path` and missing transactions, which is most of what the linter caught for this schema |
+| Dashboard → Add user | SQL, exactly as in [Step 3](#step-3-create-your-first-staff-user) |
+| Managed PITR | C5 |
+
+### C7. Keys
+
+`template.toml` generates the JWT secret and both keys. The split from
+[Step 8](#step-8-wire-up-your-application) is unchanged — anon in the browser, service key
+server-side only — but note that **self-hosted GoTrue commonly signs with HS256 against the
+shared `JWT_SECRET`** rather than asymmetric keys with JWKS. If you verify tokens yourself
+anywhere, check `GOTRUE_JWT_*` in the compose before assuming JWKS.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -358,12 +472,14 @@ make test      # applies every migration, then 38 invariant assertions
 
 ## Before you take real orders
 
-- [ ] Steps 1–8 done, every check passed
+- [ ] Steps 1–8 done, every check passed (self-hosted: Part C instead)
 - [ ] `release_expired_reservations` scheduled and its last run is recent
 - [ ] `seller_gstin` and `seller_state_code` are your real values
 - [ ] Issued one test invoice and confirmed the number and tax split
 - [ ] Service key is in a secret store, not in the client bundle
-- [ ] PITR on, and one restore actually rehearsed
+- [ ] PITR on, and one restore actually rehearsed — **self-hosted: your own backup job, and the restore drill matters more, not less** (C5)
+- [ ] Self-hosted: `shared_preload_libraries` includes pg_cron and `cron.job` lists the sweepers (C4)
+- [ ] Self-hosted: product-image storage is backed up, or Storage points at S3 (C5)
 - [ ] Supabase Advisors clean
 - [ ] Gateway and courier webhooks point at handlers that write
       `webhook_events` **before** acting
