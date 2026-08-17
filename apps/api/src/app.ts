@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { requestLogger } from "./logger";
 import { healthRoute } from "./routes/health";
+import { meRoute } from "./routes/me";
 
 /**
  * The app is built here and served in server.ts. Keeping them apart means
@@ -15,7 +16,7 @@ app.use("*", requestLogger);
 
 // Every route mounts here. B2 replaces the generic handler below with the
 // constraint-name -> message mapping from docs/schema_guide.md.
-const routes = app.route("/", healthRoute);
+const routes = app.route("/", healthRoute).route("/", meRoute);
 
 app.doc("/openapi.json", {
   openapi: "3.1.0",
