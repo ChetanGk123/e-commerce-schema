@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B2 done, B3 next`
+**Status**: `B0-B3 done, B4 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -202,15 +202,15 @@ forwarded. `bun test` 12/12.
 
 ### B3 — Migration `0012_admin_rpc.sql` · Medium · **blocks B5, B7–B9**
 
-- [ ] `admin_issue_invoice(order_id)` — `next_invoice_number()` + invoice + lines, one txn; CGST/SGST vs IGST from `store_settings.seller_state_code`
-- [ ] `admin_ship_order(order_id, items[], carrier, tracking)`
-- [ ] `admin_capture_cod(order_id)` — release → sale → payment → status → event
-- [ ] `admin_cancel_order(order_id, reason)`
-- [ ] `admin_receive_return(return_id, items[], resolution)`
-- [ ] `grant execute on function anonymize_customer(uuid) to authenticated;` (revoked from public at `anonymize_customer()` in `supabase/migrations/20260801000000_baseline.sql`)
-- [ ] Views `admin_sales_daily`, `admin_low_stock` — granted to `authenticated` only, **never `anon`**
-- [ ] Every function `security definer` + `set search_path = public, pg_temp` (pg_temp **last**)
-- [ ] **Validate**: extend `supabase/tests/01_invariants.sql`; `make test` green at 38+
+- [x] `admin_issue_invoice(order_id, place_of_supply)` — `next_invoice_number()` + invoice + lines, one txn; CGST/SGST vs IGST from `store_settings.seller_state_code`
+- [x] `admin_ship_order(order_id, items[], carrier, tracking)`
+- [x] `admin_capture_cod(order_id)` — release → sale → payment → status → event
+- [x] `admin_cancel_order(order_id, reason)`
+- [x] `admin_receive_return(return_id, items[], resolution)`
+- [x] `grant execute on function anonymize_customer(uuid) to authenticated;` (revoked from public at `anonymize_customer()` in `supabase/migrations/20260801000000_baseline.sql`)
+- [x] Views `admin_sales_daily`, `admin_low_stock` — granted to `authenticated` only, **never `anon`**
+- [x] Every function `security definer` + `set search_path = public, pg_temp` (pg_temp **last**)
+- [x] **Validate**: extend `supabase/tests/01_invariants.sql`; `make test` green at 38+
 
 ### B4 — Catalog reads · Medium
 
@@ -345,7 +345,7 @@ admin's read-only screens.
 | B0 Scaffold | **done** | Razorpay-on-Bun spike passed; live HTTP untested |
 | B1 Auth & context | **done** | audit attribution proven end to end |
 | B2 Errors | **done** | 28 rules, real-message fixtures |
-| B3 RPC migration | not started | blocks B5, B7–B9 |
+| B3 RPC migration | **done** | `20260801001200_admin_rpc.sql` |
 | B4 Catalog reads | not started | unblocks admin read-only screens |
 | B5 Cart & checkout | not started | |
 | B6 Payments & webhooks | not started | |
