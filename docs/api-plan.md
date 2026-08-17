@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B1 done, B2 next`
+**Status**: `B0-B2 done, B3 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -194,9 +194,11 @@ forwarded. `bun test` 12/12.
 
 ### B2 — Errors & response envelope · Low
 
-- [ ] Constraint name → HTTP status + user copy, seeded from `docs/schema_guide.md:651`
-- [ ] Unmapped DB errors → 500 with a support code, never the raw message
-- [ ] **Validate**: overselling returns 409 "Not enough stock", not a Postgres string
+- [x] Constraint name → HTTP status + user copy, seeded from `docs/schema_guide.md:651` (`src/errors.ts`, 28 rules)
+- [x] Unmapped DB errors → 500 with a support code, never the raw message
+- [x] `throwOnDbError()` — supabase-js *returns* errors rather than throwing, which is exactly how a refusal gets reported to a customer as success
+- [x] Identity failures (`customers.id` null) classified as **500, our bug**, not a 422 aimed at the caller
+- [x] **Validated**: overselling returns 409 "Not enough stock for one or more items." Fixtures are Postgres strings captured verbatim from the running instance, so a constraint rename fails the tests instead of silently degrading every error to a 500. `bun test` 26/26
 
 ### B3 — Migration `0012_admin_rpc.sql` · Medium · **blocks B5, B7–B9**
 
@@ -342,7 +344,7 @@ admin's read-only screens.
 |---|---|---|
 | B0 Scaffold | **done** | Razorpay-on-Bun spike passed; live HTTP untested |
 | B1 Auth & context | **done** | audit attribution proven end to end |
-| B2 Errors | not started | |
+| B2 Errors | **done** | 28 rules, real-message fixtures |
 | B3 RPC migration | not started | blocks B5, B7–B9 |
 | B4 Catalog reads | not started | unblocks admin read-only screens |
 | B5 Cart & checkout | not started | |

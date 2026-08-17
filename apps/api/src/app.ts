@@ -1,6 +1,7 @@
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
+import { type DbError, mapDatabaseError } from "./errors";
 import { requestLogger } from "./logger";
 import { healthRoute } from "./routes/health";
 import { meRoute } from "./routes/me";
@@ -32,10 +33,33 @@ app.onError((err, c) => {
   const requestId = c.get("reqId");
 
   if (err instanceof HTTPException) {
-    c.get("log")?.warn({ status: err.status, err: err.message }, "handled");
+    // throwOnDbError attaches { code, db } so the caller gets a stable code to
+    // branch on while the database's own words stay in the log.
+    const cause = err.cause as { code?: string; db?: unknown } | undefined;
+    c.get("log")?.warn(
+      { status: err.status, code: cause?.code, err: err.message, db: cause?.db },
+      "handled",
+    );
     return c.json(
-      { error: { code: "http_error", message: err.message, requestId } },
+      {
+        error: {
+          code: cause?.code ?? "http_error",
+          message: err.message,
+          requestId,
+        },
+      },
       err.status,
+    );
+  }
+
+  // A database error that escaped without going through throwOnDbError still
+  // gets translated rather than leaking.
+  const mapped = mapDatabaseError(err as DbError);
+  if (mapped) {
+    c.get("log")?.warn({ code: mapped.code, err }, "handled.db");
+    return c.json(
+      { error: { code: mapped.code, message: mapped.message, requestId } },
+      mapped.status,
     );
   }
 
