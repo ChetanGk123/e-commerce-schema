@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `not-started`
+**Status**: `B0 done, B1 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -160,12 +160,15 @@ second authorization model. **Not doing it.** Escape hatch if RPC authoring turn
 
 ### B0 — Scaffold · Low
 
-- [ ] `apps/api` — Hono on Bun, `@ecom/schema` as `workspace:*`, health route
-- [ ] Env: `SUPABASE_URL=http://kong:8000` (internal), service key, `JWT_SECRET` — **not** the public `https://supabase.<domain>` the browsers use
-- [ ] Export `AppType` for `hc`; wire `@hono/zod-openapi` and serve `/openapi.json`
-- [ ] `pino` request logging with a request id
-- [ ] **Spike: Razorpay Node SDK under Bun.** Fallbacks if it misbehaves: call their REST API with `fetch` (~100 lines), or run the API on Node — Hono runs on both unchanged
-- [ ] **Validate**: `turbo build` green; `/health` responds; OpenAPI doc renders
+- [x] `apps/api` — Hono on Bun, `@ecom/schema` as `workspace:*`, health route
+- [x] Env: `SUPABASE_URL=http://kong:8000` (internal), service key, `JWT_SECRET` — **not** the public `https://supabase.<domain>` the browsers use. Validated in `src/env.ts`, so a missing key is a startup crash naming the variable
+- [x] Export `AppType` for `hc`; wire `@hono/zod-openapi` and serve `/openapi.json`
+- [x] `pino` request logging with a request id (`x-request-id` honoured inbound, echoed outbound)
+- [x] **Spike: Razorpay Node SDK under Bun — PASSES.** `razorpay@2.9.8` instantiates and `validateWebhookSignature` works over `node:crypto`, including rejecting a tampered body. **Not** yet exercised: live HTTP to Razorpay's API (needs real credentials), so the `fetch` fallback stays on the table for B6
+- [x] **Validate**: `turbo typecheck` + `turbo build` green, `bun test` 5/5, `/health` + `/openapi.json` respond live
+
+Resolved along the way: `@hono/zod-openapi@0.19.10` peers on `zod >=3.0.0`, so the
+v3 pin in `@ecom/schema` is compatible — no split zod versions across the workspace.
 
 ### B1 — Auth & request context · Medium · **blocks everything**
 
@@ -324,7 +327,7 @@ admin's read-only screens.
 
 | Phase | Status | Notes |
 |---|---|---|
-| B0 Scaffold | not started | incl. Razorpay-on-Bun spike |
+| B0 Scaffold | **done** | Razorpay-on-Bun spike passed; live HTTP untested |
 | B1 Auth & context | not started | blocks everything |
 | B2 Errors | not started | |
 | B3 RPC migration | not started | blocks B5, B7–B9 |
