@@ -70,13 +70,14 @@ supabase/
     ..._payments        webhook recording, capture, failure
     ..._inventory       sweepers, manual stock movements, reservation monitor
     ..._returns_wallet  returns, refunds, store credit, gift cards
+    ..._invoicing       credit notes, the e-invoice stamp
   jobs/retention.sql    cron.schedule calls only — the sweeper FUNCTIONS are
                         in the migrations, because a file nothing applies is
                         a function that quietly does not exist
   seed.sql              demo data
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
-    01_invariants.sql   71 assertions
+    01_invariants.sql   76 assertions
 types/                  TypeScript types — regenerate with `make types`
 apps/api/               the shared backend — see apps/api/README.md
                         browsable at /docs, importable from /openapi.json

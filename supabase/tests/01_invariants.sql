@@ -1069,6 +1069,162 @@ $$, 'admin_grant_credit -- an entry without a note is refused');
 reset request.jwt.claim.sub;
 
 -- ============================================================
+-- Invoicing: credit notes and the e-invoice stamp (0018)
+-- ============================================================
+
+set local request.jwt.claim.sub = 'b0000000-0000-4000-8000-000000000001';
+
+-- A credit note reverses exactly what was charged, pro rata. Crediting
+-- at list price would refund tax on money the customer never paid,
+-- because the invoice line already carries its share of the discount.
+do $$
+declare
+  addr  jsonb := '{"name":"B","line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":2}]'::jsonb;
+  oid uuid; inv uuid; note uuid; line uuid;
+  parent invoices%rowtype; cn invoices%rowtype;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  oid := (checkout('cn-k1', 'h', 'buyer@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform capture_payment(oid, 'razorpay', 'order_CN1', null, 'pay_CN1');
+
+  inv := admin_issue_invoice(oid);
+  select * into parent from invoices where id = inv;
+
+  select id into line from invoice_lines
+  where invoice_id = inv and description not like 'Shipping%' limit 1;
+
+  note := admin_issue_credit_note(
+            inv, jsonb_build_array(jsonb_build_object(
+                   'invoice_line_id', line, 'quantity', 1)),
+            'one unit came back');
+  select * into cn from invoices where id = note;
+
+  if cn.kind <> 'credit_note' then
+    raise exception 'FAIL  a credit note was issued as %', cn.kind;
+  end if;
+  if cn.parent_invoice_id is distinct from inv then
+    raise exception 'FAIL  the credit note does not point at its parent';
+  end if;
+  if cn.grand_total >= parent.grand_total then
+    raise exception 'FAIL  crediting one of two units came to % against %',
+      cn.grand_total, parent.grand_total;
+  end if;
+  if cn.cgst_total <> cn.sgst_total then
+    raise exception 'FAIL  credit note CGST % and SGST % differ',
+      cn.cgst_total, cn.sgst_total;
+  end if;
+  if cn.grand_total <> cn.taxable_value + cn.cgst_total + cn.sgst_total + cn.igst_total then
+    raise exception 'FAIL  the credit note does not add up';
+  end if;
+
+  -- Crediting the remaining unit plus one more must not be possible:
+  -- crediting past the invoice files input credit the buyer is not owed.
+  begin
+    perform admin_issue_credit_note(
+      inv, jsonb_build_array(jsonb_build_object(
+             'invoice_line_id', line, 'quantity', 2)),
+      'too much');
+    raise exception 'FAIL  credited more than the invoice';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  raise notice 'PASS  admin_issue_credit_note -- reverses pro rata, points at its parent, cannot exceed it';
+end $$;
+
+-- The stamp is the IRP's, not ours, and rewriting a signed QR is the
+-- exact tampering the signature exists to make detectable.
+do $$
+declare
+  addr  jsonb := '{"name":"B","line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid uuid; inv uuid;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  oid := (checkout('cn-k2', 'h', 'buyer@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform capture_payment(oid, 'razorpay', 'order_CN2', null, 'pay_CN2');
+  inv := admin_issue_invoice(oid);
+
+  begin
+    perform admin_stamp_einvoice(inv, 'too-short', 'ACK', now(), 'QR');
+    raise exception 'FAIL  a truncated IRN was accepted, permanently';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  perform admin_stamp_einvoice(inv, repeat('a', 64), 'ACK-1', now(), 'QR-1');
+
+  begin
+    perform admin_stamp_einvoice(inv, repeat('b', 64), 'ACK-2', now(), 'QR-2');
+    raise exception 'FAIL  an invoice was stamped twice';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  begin
+    update invoices set signed_qr = 'TAMPERED' where id = inv;
+    raise exception 'FAIL  the signed QR was rewritten after stamping';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  begin
+    update invoices set ack_no = 'REWRITTEN' where id = inv;
+    raise exception 'FAIL  the acknowledgement number was rewritten after stamping';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  -- pdf_url stays mutable: regenerating a PDF from unchanged data is
+  -- housekeeping, not an amendment.
+  update invoices set pdf_url = 'https://cdn.example.com/inv.pdf' where id = inv;
+
+  raise notice 'PASS  the e-invoice stamp is writable once and final after, while pdf_url stays open';
+end $$;
+
+-- The number comes back with a rollback. That is what gap-free means:
+-- not that numbers are unique, but that a failed issue does not burn one.
+do $$
+declare before_n int; after_n int;
+begin
+  select last_number into before_n from invoice_sequences where fy = current_fy();
+  begin
+    perform next_invoice_number();
+    raise exception 'rollback me';
+  exception when others then
+    null;
+  end;
+  select last_number into after_n from invoice_sequences where fy = current_fy();
+
+  if after_n is distinct from before_n then
+    raise exception 'FAIL  a rolled-back issue burned a number: % -> %',
+      before_n, after_n;
+  end if;
+  raise notice 'PASS  invoice numbering -- a rolled-back issue gives the number back';
+end $$;
+
+select must_fail($$
+  update invoices set grand_total = 1.00
+  where id = (select id from invoices where kind = 'tax_invoice' limit 1)
+$$, 'an issued invoice cannot be edited');
+
+select must_fail($$
+  delete from invoices
+  where id = (select id from invoices where kind = 'tax_invoice' limit 1)
+$$, 'an issued invoice cannot be removed');
+
+reset request.jwt.claim.sub;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

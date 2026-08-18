@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B8 done (bar courier/messaging webhooks), B9 next`
+**Status**: `B0-B9 done (bar courier/messaging webhooks), B10 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -398,9 +398,42 @@ and `cod`. Not in any phase's checklist — flag for B12.
 
 ### B9 — GST invoicing · Medium
 
-- [ ] Issue via `admin_issue_invoice`; credit note against a parent invoice
-- [ ] e-invoice fields (IRN, ack no, signed QR) writable once, then final
-- [ ] **Validate**: numbers gap-free within a financial year; editing an invoice → refused
+- [x] Issue via `admin_issue_invoice`; credit note against a parent invoice
+- [x] e-invoice fields (IRN, ack no, signed QR) writable once, then final
+- [x] **Validate**: numbers gap-free within a financial year; editing an invoice → refused
+
+**Found here.** `protect_invoice()` pinned the IRN but **not** `ack_no`,
+`ack_date` or `signed_qr` — so a signed QR on a filed invoice could be replaced
+after the fact while the IRN it belongs to stayed put. That is exactly the
+tampering the signature exists to make detectable. The whole stamp now freezes
+together; `pdf_url` stays mutable, because regenerating a PDF from unchanged
+data is housekeeping, not an amendment.
+
+Also: B9 is the first phase to put the **B3-era admin RPCs behind HTTP**, and
+they raise plain SQLSTATEs rather than the `ECOM1`/`ECOM2` codes introduced in
+B5. Every one of them answered **500**. Issuing an invoice twice — the most
+ordinary mistake there is — told the admin to contact support. `errors.ts` now
+carries message rules for them plus a SQLSTATE fallback
+(`P0002`→404, `55000`/`55006`/`23505`→409, `42501`→403, `22023`→422) with
+generic copy, since a standard SQLSTATE is no proof we wrote the text. New
+functions should still use ECOM codes; the older ones can migrate as they are
+touched.
+
+**Decided here.**
+
+*Credit notes share the tax-invoice number series.* Rule 46 asks for one
+consecutive series per financial year and does not require a separate one. The
+`INV/` prefix on a credit note reads oddly and is left alone — changing the
+format would renumber nothing and confuse everything already filed.
+
+*Quantities are credited pro rata of each parent line's `taxable_value`,* not at
+`unit_price × quantity`. The line already carries its share of the order
+discount, so crediting at list price would refund tax on money the customer
+never paid.
+
+*There is no PATCH on an invoice, anywhere in the API.* `protect_invoice()` is a
+trigger, so it refuses the service key too. A route offering an edit would be a
+promise the database will not keep.
 
 ### B10 — Customers, support, engagement · Medium
 
@@ -498,7 +531,7 @@ admin's read-only screens.
 | B6 Payments & webhooks | **done** | `20260801001500_payments.sql`; courier/messaging deferred, provider not chosen |
 | B7 Inventory & fulfilment | **done** | `20260801001600_inventory.sql`; sweepers moved into migrations |
 | B8 Returns & money | **done** | `20260801001700_returns_wallet.sql` |
-| B9 Invoicing | not started | |
+| B9 Invoicing | **done** | `20260801001800_invoicing.sql` |
 | B10 Customers & support | not started | |
 | B11 Jobs | not started | pg_cron + outbox drain |
 | B12 Cross-cutting | not started | |

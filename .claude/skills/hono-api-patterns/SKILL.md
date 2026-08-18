@@ -134,6 +134,20 @@ expired, forged or malformed is a free oracle; the reason goes to the log.
 `requireRole` shapes the product surface and **contains nobody** — RLS ignores
 `staff_users.role`. Never describe it as a security control.
 
+## Documents a government reads
+
+Invoices are immutable, undeletable, and gap-free. `protect_invoice()` is a
+**trigger**, so it refuses the service key too.
+
+- **Never offer a PATCH/PUT/DELETE on an invoice.** A correction is a credit note --
+  a second document pointing at the first. A route that promised an edit would be a
+  promise the database will not keep.
+- **Number and write in one transaction.** A rollback gives the number back; that is
+  what gap-free means. Never call `next_invoice_number()` outside the transaction that
+  inserts the row.
+- **The e-invoice stamp is writable once**, all four fields together. `pdf_url` stays
+  mutable -- regenerating a PDF from unchanged data is not an amendment.
+
 ## Money leaving
 
 Refunds, credit and gift cards follow the same shape as webhooks, for the same
@@ -198,6 +212,7 @@ line outlives the request and lands in every backup of the log store.
 | Start a server in `app.ts` | Keep it in `server.ts` | Importing `AppType` would bind a port |
 | Test by booting a server on a port | `app.request()` | Slower, flakier, needs a free port |
 | Different 401 messages per failure mode | One message | Free oracle for attackers |
+| Exposing an old `admin_*` RPC without checking `errors.ts` | Add a rule, or convert its RAISEs to `ECOM1`/`ECOM2` | The B3-era functions raise plain SQLSTATEs; unmapped, an ordinary refusal answers 500 |
 | `new OpenAPIHono()` bare | Pass `defaultHook: validationHook` | 400s answer in a different envelope |
 | Re-declaring `ErrorResponse` per route file | Import from `schemas.ts` | `.openapi("ErrorResponse")` may register the name once |
 | Money arithmetic in the handler | Compute it in SQL | A cart and an invoice a paisa apart |

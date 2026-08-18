@@ -12,6 +12,7 @@ import { checkoutRoute } from "./routes/checkout";
 import { fulfilmentRoute } from "./routes/fulfilment";
 import { healthRoute } from "./routes/health";
 import { inventoryRoute } from "./routes/inventory";
+import { invoicingRoute } from "./routes/invoicing";
 import { meRoute } from "./routes/me";
 import { paymentsRoute } from "./routes/payments";
 import { returnsRoute } from "./routes/returns";
@@ -43,7 +44,8 @@ const routes = app
   .route("/", inventoryRoute)
   .route("/", fulfilmentRoute)
   .route("/", returnsRoute)
-  .route("/", walletRoute);
+  .route("/", walletRoute)
+  .route("/", invoicingRoute);
 
 /**
  * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes

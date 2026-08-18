@@ -230,6 +230,69 @@ const RULES: Rule[] = [
       "That shipping rate overlaps an existing band. Exactly one rate must match any basket.",
   },
 
+  // --- invoicing and the admin RPCs -------------------------------------
+  //
+  // These strings come from our own admin_* functions, which predate the
+  // ECOM1/ECOM2 convention and still raise standard SQLSTATEs. Matched by
+  // message here rather than re-pasting 400 lines of migration to change
+  // five RAISE statements; new functions should use ECOM codes instead.
+  {
+    match: "already has a tax invoice",
+    status: 409,
+    code: "already_invoiced",
+    message: "This order has already been invoiced. Issue a credit note to correct it.",
+  },
+  {
+    match: "is already stamped",
+    status: 409,
+    code: "already_stamped",
+    message: "That invoice already carries an e-invoice stamp, and the stamp is final.",
+  },
+  {
+    match: "is unpaid",
+    status: 409,
+    code: "order_unpaid",
+    message: "Nothing has been captured for this order yet.",
+  },
+  {
+    match: "seller_gstin is not set",
+    status: 409,
+    code: "seller_gstin_missing",
+    message:
+      "The store's GSTIN is not configured, so invoices cannot be issued. Set it in store settings.",
+  },
+  {
+    match: "no place of supply",
+    status: 422,
+    code: "place_of_supply_missing",
+    message:
+      "No place of supply, and the store has no state code configured. Send a two-digit GST state code.",
+  },
+  {
+    match: "has no line items",
+    status: 409,
+    code: "order_empty",
+    message: "That order has no line items to invoice.",
+  },
+  {
+    match: "cannot be cancelled",
+    status: 409,
+    code: "order_not_cancellable",
+    message: "This order has gone too far to cancel.",
+  },
+  {
+    match: "not pending",
+    status: 409,
+    code: "order_not_pending",
+    message: "This order is no longer awaiting payment.",
+  },
+  {
+    match: "is already",
+    status: 409,
+    code: "already_settled",
+    message: "That record has already been settled.",
+  },
+
   // --- access -------------------------------------------------------------
   {
     match: "violates row-level security",
@@ -293,6 +356,44 @@ export function mapDatabaseError(
   if (err.code === "PGRST116") {
     return { status: 404, code: "not_found", message: "Not found." };
   }
+
+  // Last resort before a 500: a handful of SQLSTATEs mean something
+  // definite, and answering 500 for them tells a caller to retry
+  // something that will never succeed. The message stays generic --
+  // unlike an ECOM code, a standard SQLSTATE is no proof we wrote the
+  // text, so the database's own words still do not go out.
+  const BY_SQLSTATE: Record<string, MappedError> = {
+    // no_data_found -- our admin_* functions raise this for "not found"
+    P0002: { status: 404, code: "not_found", message: "Not found." },
+    // object_not_in_prerequisite_state -- the record is in the wrong state
+    "55000": {
+      status: 409,
+      code: "wrong_state",
+      message: "That is not possible in this record's current state.",
+    },
+    // lock_not_available
+    "55006": {
+      status: 409,
+      code: "in_progress",
+      message: "That is still being processed. Try again in a moment.",
+    },
+    "23505": {
+      status: 409,
+      code: "already_exists",
+      message: "That already exists.",
+    },
+    "42501": {
+      status: 403,
+      code: "forbidden",
+      message: "You are not allowed to perform that action.",
+    },
+    "22023": {
+      status: 422,
+      code: "invalid_parameter",
+      message: "One of the values sent is not valid here.",
+    },
+  };
+  if (err.code && BY_SQLSTATE[err.code]) return BY_SQLSTATE[err.code]!;
 
   return null;
 }
