@@ -218,6 +218,10 @@ async function process(
         // Back to rupees. capture_payment refuses a mismatch rather than
         // marking an order paid for the wrong amount.
         p_amount: entity?.amount != null ? entity.amount / 100 : null,
+        // The gateway PAYMENT id, kept apart from the ORDER id above.
+        // Refunds are issued against this one; without it, nothing can
+        // be refunded through the gateway at all.
+        p_provider_payment_ref: entity?.id ?? null,
       });
       throwOnDbError(error);
       return;

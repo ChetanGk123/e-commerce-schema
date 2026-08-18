@@ -302,6 +302,7 @@ export interface Payment {
   status: PaymentStatus;  // has default
   created_at: string;  // has default
   updated_at: string;  // has default
+  provider_payment_ref: string | null;
 }
 
 export interface OrderEvent {

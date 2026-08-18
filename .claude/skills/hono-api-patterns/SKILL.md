@@ -134,6 +134,27 @@ expired, forged or malformed is a free oracle; the reason goes to the log.
 `requireRole` shapes the product surface and **contains nobody** — RLS ignores
 `staff_users.role`. Never describe it as a security control.
 
+## Money leaving
+
+Refunds, credit and gift cards follow the same shape as webhooks, for the same
+reason: the record has to survive the failure.
+
+1. **Write the intent first, then call the gateway.** `admin_refund` inserts a
+   `refunds` row as `initiated` before anything reaches Razorpay. A refund that
+   evaporates on a timeout is one the customer was already told about.
+2. **Never compute a balance in the handler.** `customer_credit_balances` for store
+   credit, `gift_cards.balance` maintained by trigger. `credit_ledger` is append-only:
+   a wrong entry is fixed by a compensating entry, and both stay visible.
+3. **A gift card code exists in exactly one response.** Only `digest(code,'sha256')` is
+   stored. Never log it, never return it again, and keep it out of every schema but the
+   issue response.
+4. **One message for every redemption failure.** "Expired" versus "unknown" tells
+   someone guessing codes that they guessed one.
+5. **pgcrypto is in the `extensions` schema on Supabase**, so any function using
+   `digest()` or `gen_random_bytes()` needs `set search_path = public, extensions,
+   pg_temp`. A missing schema in search_path is ignored, so this is safe on plain
+   Postgres. pg_temp stays last.
+
 ## Webhooks
 
 Verify, record, act, mark processed — in that order, and the order is the design.

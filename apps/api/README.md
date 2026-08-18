@@ -4,7 +4,7 @@ Hono on Bun. One service behind both the admin console and the storefront.
 
 ```sh
 bun run dev        # http://localhost:3001, hot reload
-bun test           # 80 in-process tests: no port, no network, no database
+bun test           # 94 in-process tests: no port, no network, no database
 bun run typecheck
 ```
 

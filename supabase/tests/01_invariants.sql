@@ -894,6 +894,181 @@ end $$;
 reset request.jwt.claim.sub;
 
 -- ============================================================
+-- Returns, refunds and the wallet (0017)
+-- ============================================================
+
+set local request.jwt.claim.sub = 'b0000000-0000-4000-8000-000000000001';
+
+-- The code exists in plaintext for exactly one response and is never
+-- stored. A leaked backup of gift_cards must not be a wallet.
+do $$
+declare g jsonb; code text; n int;
+begin
+  g    := admin_issue_gift_card(1000.00, 'friend@example.com');
+  code := g ->> 'code';
+
+  if code is null or length(code) <> 16 then
+    raise exception 'FAIL  admin_issue_gift_card returned code %', coalesce(code, '(null)');
+  end if;
+
+  select count(*) into n from gift_cards where code_hash = digest(code, 'sha256');
+  if n <> 1 then
+    raise exception 'FAIL  the issued card is not findable by its hash';
+  end if;
+
+  -- Nothing anywhere in the row should hold the code itself.
+  select count(*) into n from gift_cards gc
+  where gc.code_hash = digest(code, 'sha256')
+    and to_jsonb(gc)::text like '%' || code || '%';
+  if n <> 0 then
+    raise exception 'FAIL  the gift card row stores the plaintext code';
+  end if;
+
+  raise notice 'PASS  admin_issue_gift_card -- the code is returned once and stored only as a hash';
+end $$;
+
+-- Overspending is refused by CHECK (balance >= 0), not by the API
+-- remembering to look.
+do $$
+declare g jsonb; gid uuid;
+begin
+  g   := admin_issue_gift_card(500.00);
+  gid := (g ->> 'gift_card_id')::uuid;
+  begin
+    insert into gift_card_transactions (gift_card_id, delta, balance_after)
+    values (gid, -600.00, -100.00);
+    raise exception 'FAIL  a gift card was overspent';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+  raise notice 'PASS  gift cards -- spending more than the balance is refused';
+end $$;
+
+-- Redeeming converts the whole balance to store credit, once.
+do $$
+declare g jsonb; code text; r jsonb; bal numeric;
+begin
+  g    := admin_issue_gift_card(1500.00);
+  code := g ->> 'code';
+
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  r := redeem_gift_card(code);
+
+  if (r ->> 'redeemed')::numeric <> 1500.00 then
+    raise exception 'FAIL  redeemed % of a 1500 card', r ->> 'redeemed';
+  end if;
+
+  select balance into bal from customer_credit_balances
+  where customer_id = 'a0000000-0000-4000-8000-000000000001';
+  if bal < 1500.00 then
+    raise exception 'FAIL  credit balance is % after redeeming 1500', bal;
+  end if;
+
+  begin
+    perform redeem_gift_card(code);
+    raise exception 'FAIL  the same gift card was redeemed twice';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  raise notice 'PASS  redeem_gift_card -- whole balance to credit, and only once';
+end $$;
+
+-- Money going back out, with the order status rule that matters:
+-- 'refunded' tells the warehouse to stop shipping, so a PARTIAL refund
+-- must not set it.
+do $$
+declare
+  addr  jsonb := '{"line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid uuid; total numeric; j jsonb; st text;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  oid := (checkout('rf-k1', 'h', 'buyer@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform capture_payment(oid, 'razorpay', 'order_RF1', null, 'pay_RF1');
+
+  select grand_total into total from orders where id = oid;
+
+  j := admin_refund(oid, round(total / 2, 2), null, 'half back');
+  perform settle_refund((j ->> 'refund_id')::uuid, 'processed', 'rfnd_half');
+
+  select status into st from orders where id = oid;
+  if st = 'refunded' then
+    raise exception 'FAIL  a partial refund marked the whole order refunded';
+  end if;
+
+  begin
+    perform admin_refund(oid, total, null, 'too much');
+    raise exception 'FAIL  refunded more than was captured';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  j := admin_refund(oid, total - round(total / 2, 2), null, 'the rest');
+  perform settle_refund((j ->> 'refund_id')::uuid, 'processed', 'rfnd_rest');
+
+  select status into st from orders where id = oid;
+  if st <> 'refunded' then
+    raise exception 'FAIL  a fully refunded order is still %', st;
+  end if;
+
+  raise notice 'PASS  admin_refund -- partial leaves the order alone, full settles it, over-refund is refused';
+end $$;
+
+-- A redelivered settlement must not double-count.
+do $$
+declare
+  addr  jsonb := '{"line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid uuid; j jsonb; n int;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  oid := (checkout('rf-k2', 'h', 'buyer@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform capture_payment(oid, 'razorpay', 'order_RF2', null, 'pay_RF2');
+
+  j := admin_refund(oid, 10.00, null, 'small');
+  perform settle_refund((j ->> 'refund_id')::uuid, 'processed', 'rfnd_dupe');
+  perform settle_refund((j ->> 'refund_id')::uuid, 'failed', 'rfnd_dupe');
+
+  select count(*) into n from refunds
+  where order_id = oid and status = 'processed';
+  if n <> 1 then
+    raise exception 'FAIL  a re-settled refund produced % processed rows', n;
+  end if;
+  raise notice 'PASS  settle_refund -- settling twice does not unsettle or duplicate';
+end $$;
+
+-- Store credit: the reasons that must be earned cannot be granted, and
+-- the balance cannot be driven negative.
+select must_fail($$
+  select admin_grant_credit('a0000000-0000-4000-8000-000000000001',
+                            500, 'return_credit', 'invented')
+$$, 'admin_grant_credit -- return_credit cannot be granted by hand');
+
+select must_fail($$
+  select admin_grant_credit('a0000000-0000-4000-8000-000000000001',
+                            -99999999, 'adjustment', 'clawback')
+$$, 'admin_grant_credit -- the balance cannot go below zero');
+
+select must_fail($$
+  select admin_grant_credit('a0000000-0000-4000-8000-000000000001',
+                            100, 'goodwill', '  ')
+$$, 'admin_grant_credit -- an entry without a note is refused');
+
+reset request.jwt.claim.sub;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

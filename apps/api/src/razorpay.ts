@@ -57,3 +57,21 @@ export function webhookIsAuthentic(raw: string, signature: string): boolean {
 
 /** Money crosses the wire in paise. numeric(12,2) times 100 is exact. */
 export const toPaise = (rupees: number): number => Math.round(rupees * 100);
+
+/**
+ * Send money back.
+ *
+ * Razorpay refunds against the PAYMENT id, not the order id -- which is
+ * why payments carries both. Called only after a refunds row exists in
+ * 'initiated', so a failure here leaves a visible, retryable record
+ * rather than a refund that evaporated.
+ */
+export async function refundPayment(
+  paymentId: string,
+  amountPaise: number,
+): Promise<string> {
+  const created = await razorpay().payments.refund(paymentId, {
+    amount: amountPaise,
+  });
+  return created.id;
+}

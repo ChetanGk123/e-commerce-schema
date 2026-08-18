@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B7 done (bar courier/messaging webhooks), B8 next`
+**Status**: `B0-B8 done (bar courier/messaging webhooks), B9 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -352,11 +352,49 @@ codebase, and a test of one route cannot catch the next route.
 
 ### B8 — Returns, refunds, credit, gift cards · High
 
-- [ ] Return request (customer) → approve → `admin_receive_return` (staff)
-- [ ] Refunds against the original payment; provider ref unique
-- [ ] Credit ledger entries; balance read from `customer_credit_balances`, never summed by hand
-- [ ] Gift cards — issue returns the code **once**; lookup by `digest(code,'sha256')`, server-side only
-- [ ] **Validate**: overspend a gift card → refused; return more than ordered → refused
+- [x] Return request (customer) → approve → `admin_receive_return` (staff)
+- [x] Refunds against the original payment; provider ref unique (already in the baseline)
+- [x] Credit ledger entries; balance read from `customer_credit_balances`, never summed by hand
+- [x] Gift cards — issue returns the code **once**; lookup by `digest(code,'sha256')`, server-side only
+- [x] **Validate**: overspend a gift card → refused; return more than ordered → refused
+
+**Found here.** `payments.provider_ref` holds the gateway **order** id, which is
+what the webhook resolves against — but Razorpay refunds against the **payment**
+id. One column cannot be both, so no refund could be issued at all. Added
+`payments.provider_payment_ref`; `capture_payment` now stores both.
+
+Also: **pgcrypto lives in the `extensions` schema on Supabase**, not `public`.
+The baseline's `create extension if not exists pgcrypto` was a no-op because the
+image had already installed it there, so every function with
+`search_path = public, pg_temp` sees neither `digest()` nor `gen_random_bytes()`.
+The gift-card functions name `extensions` explicitly (a search_path entry for a
+schema that does not exist is ignored, so this is safe on plain Postgres too).
+
+**Decided here.**
+
+*`request_return` is SECURITY INVOKER.* RLS already says the right thing —
+`own_returns_i` pins status to `requested`, `own_return_items_i` pins `condition`
+to null so nobody grades their own goods. A definer function would throw all of
+that away and reimplement it worse. What the function adds is the one thing RLS
+cannot: the request and its lines in one transaction.
+
+*A refund is recorded before the gateway is asked*, same reasoning as the webhook
+handler. If the gateway is unreachable the row stays `initiated` — visible and
+retryable via `/admin/refunds/{id}/settle`, which is also the COD path, where a
+human moves the money and is the only one who knows it happened.
+
+*A partial refund does not move the order to `refunded`.* That status tells the
+warehouse to stop shipping goods the customer is still owed.
+
+*Gift cards redeem whole, to store credit.* A card with a balance and a customer
+with a balance are two places money can be; the credit ledger already handles
+spending a bit at a time. Every redemption failure returns one message —
+distinguishing "expired" from "unknown" tells someone guessing codes that they
+guessed one.
+
+**Known gap**: checkout cannot yet *spend* store credit. `credit_ledger` has the
+`order_payment` reason waiting for it, but B5's checkout takes only `razorpay`
+and `cod`. Not in any phase's checklist — flag for B12.
 
 ### B9 — GST invoicing · Medium
 
@@ -459,7 +497,7 @@ admin's read-only screens.
 | B5 Cart & checkout | **done** | `20260801001400_checkout.sql`; guest carts on the service key |
 | B6 Payments & webhooks | **done** | `20260801001500_payments.sql`; courier/messaging deferred, provider not chosen |
 | B7 Inventory & fulfilment | **done** | `20260801001600_inventory.sql`; sweepers moved into migrations |
-| B8 Returns & money | not started | |
+| B8 Returns & money | **done** | `20260801001700_returns_wallet.sql` |
 | B9 Invoicing | not started | |
 | B10 Customers & support | not started | |
 | B11 Jobs | not started | pg_cron + outbox drain |
