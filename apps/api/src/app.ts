@@ -11,7 +11,9 @@ import { catalogRoute } from "./routes/catalog";
 import { checkoutRoute } from "./routes/checkout";
 import { healthRoute } from "./routes/health";
 import { meRoute } from "./routes/me";
+import { paymentsRoute } from "./routes/payments";
 import { shippingRoute } from "./routes/shipping";
+import { webhooksRoute } from "./routes/webhooks";
 
 /**
  * The app is built here and served in server.ts. Keeping them apart means
@@ -31,7 +33,9 @@ const routes = app
   .route("/", adminCatalogRoute)
   .route("/", shippingRoute)
   .route("/", cartRoute)
-  .route("/", checkoutRoute);
+  .route("/", checkoutRoute)
+  .route("/", paymentsRoute)
+  .route("/", webhooksRoute);
 
 /**
  * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes

@@ -21,6 +21,19 @@ const schema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   /** Self-hosted GoTrue signs HS256 with this. Confirmed from the template. */
   SUPABASE_JWT_SECRET: z.string().min(1),
+
+  /**
+   * Razorpay. Optional, so the catalog, cart and COD checkout all run --
+   * and the test suite runs -- on a machine with no gateway credentials.
+   * The payment routes answer 503 when they are missing rather than
+   * failing at import and taking the whole API down with them.
+   *
+   * KEY_ID is public: it is handed to the browser to open the checkout
+   * widget. KEY_SECRET and WEBHOOK_SECRET never leave this process.
+   */
+  RAZORPAY_KEY_ID: z.string().min(1).optional(),
+  RAZORPAY_KEY_SECRET: z.string().min(1).optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().min(1).optional(),
 });
 
 const parsed = schema.safeParse(process.env);

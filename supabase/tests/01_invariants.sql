@@ -614,6 +614,167 @@ begin
 end $$;
 
 -- ============================================================
+-- Payments and webhooks (0015)
+-- ============================================================
+
+-- Restock first, because the assertions above have been buying. Note the
+-- shape: a 'purchase' movement, never `update product_variants set stock`.
+-- The column is a cache the ledger maintains.
+insert into inventory_movements (variant_id, quantity, reason, note)
+values ('d0000000-0000-4000-8000-000000000001', 50, 'purchase',
+        'restock for the payment assertions');
+
+-- A gateway that delivers twice must change the world once. Everything
+-- below is that sentence, taken apart.
+do $$
+declare
+  addr  jsonb := '{"name":"G","line1":"1 St","city":"Bengaluru",
+                   "state":"Karnataka","postal_code":"560001","country":"IN"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid   uuid;
+  before_stock int; after_stock int;
+  first_call boolean; second_call boolean;
+  w record; w2 record;
+  n_sale int; n_pay int;
+begin
+  select stock into before_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+
+  oid := (checkout('pay-k1', 'h', 'g@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  perform attach_payment_ref(oid, 'razorpay', 'order_RZP_1');
+
+  select * into w from record_webhook('razorpay', 'evt_1', 'payment.captured',
+                                      '{}'::jsonb, true);
+  if not w.is_new or w.already_processed then
+    raise exception 'FAIL  a first delivery reported is_new=% processed=%',
+      w.is_new, w.already_processed;
+  end if;
+
+  first_call := capture_payment(oid, 'razorpay', 'order_RZP_1');
+  perform mark_webhook_processed(w.id);
+
+  -- The redelivery.
+  select * into w2 from record_webhook('razorpay', 'evt_1', 'payment.captured',
+                                       '{}'::jsonb, true);
+  if w2.is_new then
+    raise exception 'FAIL  a redelivery was recorded as a new event';
+  end if;
+  if not w2.already_processed then
+    raise exception 'FAIL  a redelivery of a processed event did not say so';
+  end if;
+  if w2.attempts <> 2 then
+    raise exception 'FAIL  attempts is % after two deliveries', w2.attempts;
+  end if;
+
+  second_call := capture_payment(oid, 'razorpay', 'order_RZP_1');
+  if first_call is not true or second_call is not false then
+    raise exception 'FAIL  capture_payment reported first=% second=%',
+      first_call, second_call;
+  end if;
+
+  select count(*) into n_sale from inventory_movements
+  where order_id = oid and reason = 'sale';
+  if n_sale <> 1 then
+    raise exception 'FAIL  % sale movements for one capture', n_sale;
+  end if;
+
+  select count(*) into n_pay from payments where order_id = oid;
+  if n_pay <> 1 then
+    raise exception 'FAIL  % payment rows for one order', n_pay;
+  end if;
+
+  select stock into after_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+  if before_stock - after_stock <> 1 then
+    raise exception 'FAIL  a doubly-delivered capture moved % units, not 1',
+      before_stock - after_stock;
+  end if;
+
+  raise notice 'PASS  webhook + capture -- the same delivery twice changes the world once';
+end $$;
+
+-- Marking an order paid for the wrong amount cannot be undone without a
+-- person, so it is refused rather than reconciled.
+do $$
+declare
+  addr  jsonb := '{"line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid uuid;
+begin
+  oid := (checkout('pay-k2', 'h', 'g@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  begin
+    perform capture_payment(oid, 'razorpay', 'order_RZP_2', 1.00);
+    raise exception 'FAIL  capture_payment accepted 1.00 against a larger order';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+  raise notice 'PASS  capture_payment -- a short capture is refused, not reconciled';
+end $$;
+
+-- payment.failed is not terminal at the gateway: a mistyped OTP fires it
+-- and the customer retries in the same session. Releasing there would hand
+-- their basket away mid-checkout.
+do $$
+declare
+  addr  jsonb := '{"line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid uuid; st text; holds int;
+begin
+  oid := (checkout('pay-k3', 'h', 'g@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+  perform fail_payment(oid, 'razorpay', 'order_RZP_3', 'declined');
+
+  select status into st from orders where id = oid;
+  if st <> 'pending' then
+    raise exception 'FAIL  a failed payment moved the order to %', st;
+  end if;
+
+  select count(*) into holds from inventory_movements m
+  where m.order_id = oid and m.reason = 'reservation'
+    and not exists (select 1 from inventory_movements c where c.reservation_id = m.id);
+  if holds <> 1 then
+    raise exception 'FAIL  a failed payment released the hold (% left open)', holds;
+  end if;
+  raise notice 'PASS  fail_payment -- the stock hold survives a retryable failure';
+end $$;
+
+-- The quiet one. With no reservation left to consume, a capture that only
+-- looked for reservations would mark the order paid and never take the
+-- stock, and nobody would find out until someone counted the shelf.
+do $$
+declare
+  addr  jsonb := '{"line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  oid uuid; before_stock int; after_stock int;
+begin
+  oid := (checkout('pay-k4', 'h', 'g@example.com', '+919876543210',
+                   items, addr, 'razorpay') ->> 'order_id')::uuid;
+
+  -- Stand in for release_expired_reservations() having swept the hold.
+  insert into inventory_movements (variant_id, quantity, reason, order_id, reservation_id)
+  select m.variant_id, -m.quantity, 'release', m.order_id, m.id
+  from inventory_movements m
+  where m.order_id = oid and m.reason = 'reservation';
+
+  select stock into before_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+
+  perform capture_payment(oid, 'razorpay', 'order_RZP_4');
+
+  select stock into after_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+
+  if before_stock - after_stock <> 1 then
+    raise exception
+      'FAIL  capture after an expired hold moved % units, not 1 -- silent oversell',
+      before_stock - after_stock;
+  end if;
+  raise notice 'PASS  capture_payment -- an expired hold still takes the stock at capture';
+end $$;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B5 done, B6 next`
+**Status**: `B0-B6 done (bar courier/messaging webhooks), B7 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -275,11 +275,48 @@ for exactly this.
 
 ### B6 — Payments & webhooks · **High**
 
-- [ ] Razorpay order creation and capture
-- [ ] Webhook handler: verify signature → **insert `webhook_events` before acting** → process → set `processed_at`
-- [ ] Capture converts reservation → release + sale; failure releases only
-- [ ] Courier and messaging provider webhooks on the same pattern
-- [ ] **Validate**: deliver the same webhook twice → one state change, second is a no-op
+- [x] Razorpay order creation and capture
+- [x] Webhook handler: verify signature → **insert `webhook_events` before acting** → process → set `processed_at`
+- [x] Capture converts reservation → release + sale
+- [ ] ~~Courier and messaging provider webhooks~~ — **deferred, not blocked.** The
+      pattern is done and reusable (`record_webhook` / `mark_webhook_processed`), but
+      the signature scheme is provider-specific and no courier or SMS provider has been
+      chosen. Inventing one would be worse than leaving it: ~20 lines each once the
+      provider is picked, updating `shipments.status` and `message_log.status`
+- [x] **Validate**: deliver the same webhook twice → one state change, second is a no-op
+
+**Decided here.**
+
+*Acknowledgement means recorded, not acted on.* Once a delivery is safely in
+`webhook_events` the handler answers 200 even if processing failed, with the
+reason in `webhook_events.error`. A non-2xx would make Razorpay retry for days
+over something a retry cannot fix — a captured payment for stock that is gone
+needs a person. 5xx is reserved for the one case a retry does fix: the delivery
+could not be written down at all. Re-driving unprocessed rows is B11's job.
+
+*`processed_at` is the gate, not the unique index.* A duplicate whose first
+attempt failed still needs processing, so the question is never "have I seen
+this?" but "did it finish?".
+
+*Unverified deliveries are rejected without being recorded.* Writing them down
+would give forensics and also let anyone fill the table by posting garbage. The
+rejection goes to the log instead.
+
+*`payment.failed` does not release the hold*, contrary to `schema_guide` §20's
+"release only". It is not terminal at Razorpay — a mistyped OTP fires it and the
+customer retries in the same session, so releasing would hand their basket away
+mid-checkout and leave the retry with no hold. `expires_at` plus
+`release_expired_reservations()` is the release mechanism; a terminal failure is
+a cancellation, and `admin_cancel_order` releases immediately.
+
+*Opening the gateway order is a separate call from checkout.* Checkout is one
+database transaction; an outbound HTTP call inside it would hold that
+transaction open across the internet and a gateway timeout would roll back a
+good order.
+
+**Not verified**: the outbound call to Razorpay's API. There are no live
+credentials here, so only the failure path is proven (a clean 502, no gateway
+detail leaked). Everything on this side of the wire is verified end to end.
 
 ### B7 — Inventory & fulfilment · Medium
 
@@ -395,7 +432,7 @@ admin's read-only screens.
 | B3 RPC migration | **done** | `20260801001200_admin_rpc.sql` |
 | B4 Catalog reads | **done** | `20260801001300_catalog.sql`; storefront on the anon role |
 | B5 Cart & checkout | **done** | `20260801001400_checkout.sql`; guest carts on the service key |
-| B6 Payments & webhooks | not started | |
+| B6 Payments & webhooks | **done** | `20260801001500_payments.sql`; courier/messaging deferred, provider not chosen |
 | B7 Inventory & fulfilment | not started | |
 | B8 Returns & money | not started | |
 | B9 Invoicing | not started | |

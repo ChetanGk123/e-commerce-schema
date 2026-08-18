@@ -91,6 +91,7 @@ This is the decision most likely to be got wrong, and it is silent when it is.
 | Public storefront reads (`/catalog`, `/shipping`) | `anonClient()` | The public view of the catalog, identically for everyone. RLS's `public_read` policies do the scoping |
 | Guest carts (no token at all) | `serviceClient()` | `carts` has no policy for `anon`; the schema says a JWT-less session identity cannot be trusted to RLS |
 | Payment capture, webhooks, creating staff auth users | `serviceClient()` | Acts with no user present |
+| Reading a guest order (`/payments/*`) | `serviceClient()` | A guest order has no `customer_id`, so no policy can reach it; authorise explicitly in the handler |
 | Anything else | `callerClient(token)` | Default to the caller |
 
 Storefront routes use `anonClient()` **even when the caller is signed in**. Forwarding a
@@ -132,6 +133,26 @@ expired, forged or malformed is a free oracle; the reason goes to the log.
 
 `requireRole` shapes the product surface and **contains nobody** — RLS ignores
 `staff_users.role`. Never describe it as a security control.
+
+## Webhooks
+
+Verify, record, act, mark processed — in that order, and the order is the design.
+
+1. **The signature is the only authentication.** Verify it over the **raw body**
+   (`await c.req.text()`), never over re-serialised JSON: the HMAC is over bytes, and
+   whitespace or key order changing makes every signature fail in a way that reads like
+   a wrong secret.
+2. **Record before acting.** `record_webhook()` first. A crash between acting and
+   recording captures twice.
+3. **Gate on `processed_at`, not on the unique index.** A duplicate whose first attempt
+   *failed* still needs processing.
+4. **Acknowledgement means recorded, not acted on.** Once the row is written, answer
+   200 even if processing failed and put the reason in `webhook_events.error`. Reserve
+   5xx for "could not write it down" — the only failure a retry fixes.
+5. **No `security: [{ bearerAuth: [] }]`** on a webhook route. A gateway cannot send our
+   token, and declaring it makes the published docs lie.
+6. **Reject unverified deliveries without recording them**, or anyone can fill the
+   table by posting garbage. The rejection goes to the log.
 
 ## Logging
 
