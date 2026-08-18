@@ -90,6 +90,13 @@ insert into product_variants (id, product_id, sku, price, stock, is_default) val
   ('d0000000-0000-4000-8000-000000000002',
    'c0000000-0000-4000-8000-000000000002', 'SKU-DRAFT-1', 2000.00, 5, true);
 
+-- Prices that do not divide cleanly, for the discount-apportionment tests.
+insert into product_variants (id, product_id, sku, price, stock) values
+  ('d0000000-0000-4000-8000-000000000003',
+   'c0000000-0000-4000-8000-000000000001', 'SKU-TEST-3', 33.34, 100),
+  ('d0000000-0000-4000-8000-000000000004',
+   'c0000000-0000-4000-8000-000000000001', 'SKU-TEST-4', 33.33, 100);
+
 insert into orders (id, email, subtotal, grand_total, shipping_address, customer_id)
 values ('e0000000-0000-4000-8000-000000000001', 'buyer@example.com',
         1000.00, 1000.00, '{}'::jsonb, 'a0000000-0000-4000-8000-000000000001');
@@ -438,6 +445,172 @@ begin
     raise exception 'FAIL  search_products read "%%" as a wildcard and returned % rows', n;
   end if;
   raise notice 'PASS  search_products escapes LIKE wildcards in the query string';
+end $$;
+
+-- ============================================================
+-- Checkout (0014)
+-- ============================================================
+
+update products set gst_rate = 18.00, hsn_code = '8471'
+where id = 'c0000000-0000-4000-8000-000000000001';
+
+update store_settings
+set seller_gstin = '29ABCDE1234F1Z5', seller_state_code = '29'
+where id = 1;
+
+-- Three lines that do not divide cleanly. 33.34 + 33.33 + 33.33 = 100.00,
+-- and a 1.00 discount apportioned by value rounds to 0.34/0.33/0.33 --
+-- shares that add to 1.00 only if the last line takes the remainder.
+do $$
+declare total numeric;
+begin
+  select sum((e ->> 'taxable_value')::numeric) into total
+  from jsonb_array_elements(apportion_taxable(
+    '[{"line_total":33.34,"gst_rate":18},
+      {"line_total":33.33,"gst_rate":18},
+      {"line_total":33.33,"gst_rate":18}]'::jsonb, 100.00, 1.00)) e;
+
+  if total <> 99.00 then
+    raise exception
+      'FAIL  apportion_taxable shares sum to %, not the 99.00 actually charged', total;
+  end if;
+  raise notice 'PASS  apportion_taxable -- rounded discount shares add back up exactly';
+end $$;
+
+-- Idempotency is the difference between a double-tap and a double order.
+do $$
+declare
+  addr jsonb := '{"name":"G","line1":"1 St","city":"Bengaluru",
+                  "state":"Karnataka","postal_code":"560001","country":"IN"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":2}]'::jsonb;
+  r1 jsonb; r2 jsonb; n int; before_stock int; left_in_stock int;
+begin
+  -- Relative, not absolute: earlier assertions in this file move stock too.
+  select stock into before_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+
+  r1 := checkout('inv-k1', 'hash-1', 'guest@example.com', '+919876543210',
+                 items, addr, 'cod');
+  r2 := checkout('inv-k1', 'hash-1', 'guest@example.com', '+919876543210',
+                 items, addr, 'cod');
+
+  if (r1 ->> 'order_id') is distinct from (r2 ->> 'order_id') then
+    raise exception 'FAIL  replaying an idempotency key created a second order';
+  end if;
+
+  select count(*) into n from orders where id = (r1 ->> 'order_id')::uuid;
+  if n <> 1 then raise exception 'FAIL  checkout produced % orders', n; end if;
+
+  -- The one that actually bites: a replay that moves stock again.
+  select stock into left_in_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+  if before_stock - left_in_stock <> 2 then
+    raise exception 'FAIL  replay moved % units of stock, not the 2 ordered',
+      before_stock - left_in_stock;
+  end if;
+
+  raise notice 'PASS  checkout -- a replayed key returns the first response and moves stock once';
+end $$;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from inventory_movements
+  where reason = 'reservation' and expires_at is null;
+  if n <> 0 then
+    raise exception 'FAIL  % reservation(s) with no expiry -- that stock is stranded', n;
+  end if;
+  raise notice 'PASS  checkout -- every reservation carries an expiry';
+end $$;
+
+select must_fail($$
+  select checkout('inv-k2', 'hash-2', 'g@example.com', '+919876543210',
+    '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":999}]'::jsonb,
+    '{"postal_code":"560001"}'::jsonb, 'cod')
+$$, 'checkout -- overselling is refused, and takes the order with it');
+
+select must_fail($$
+  select checkout('inv-k3', 'hash-3', 'g@example.com', '+919876543210',
+    '[{"variant_id":"d0000000-0000-4000-8000-000000000002","quantity":1}]'::jsonb,
+    '{"postal_code":"560001"}'::jsonb, 'cod')
+$$, 'checkout -- a draft product cannot be bought');
+
+select must_fail($$
+  select checkout('inv-k4', 'hash-4', 'g@example.com', '+919876543210',
+    '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb,
+    '{"postal_code":"999999"}'::jsonb, 'cod')
+$$, 'checkout -- an unserviceable pincode is refused before an order exists');
+
+-- Same key, different body is a client bug. Replaying the first response
+-- would hide it and bill for the wrong basket.
+select must_fail($$
+  select checkout('inv-k1', 'DIFFERENT-HASH', 'guest@example.com', '+919876543210',
+    '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":2}]'::jsonb,
+    '{"postal_code":"560001"}'::jsonb, 'cod')
+$$, 'checkout -- an idempotency key reused with a different body is refused');
+
+-- The reason apportion_taxable is shared rather than written twice: an
+-- invoice that does not total what the customer was charged is a filing
+-- problem, not a rounding curiosity.
+do $$
+declare
+  addr jsonb := '{"name":"G","line1":"1 St","city":"Bengaluru",
+                  "state":"Karnataka","postal_code":"560001","country":"IN"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000003","quantity":1},
+                   {"variant_id":"d0000000-0000-4000-8000-000000000004","quantity":2}]'::jsonb;
+  oid uuid;
+  ot numeric; it numeric; cg numeric; sg numeric; ig numeric;
+begin
+  oid := (checkout('inv-k5', 'hash-5', 'g@example.com', '+919876543210',
+                   items, addr, 'cod') ->> 'order_id')::uuid;
+  update orders set status = 'paid' where id = oid;
+
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform admin_issue_invoice(oid);
+
+  select o.grand_total, i.grand_total, i.cgst_total, i.sgst_total, i.igst_total
+    into ot, it, cg, sg, ig
+  from orders o join invoices i on i.order_id = o.id where o.id = oid;
+
+  if ot <> it then
+    raise exception 'FAIL  intra-state invoice totals % against an order of %', it, ot;
+  end if;
+  if cg <> sg then
+    raise exception 'FAIL  CGST % and SGST % are not equal', cg, sg;
+  end if;
+  raise notice 'PASS  checkout + invoice -- an intra-state invoice totals exactly what was charged';
+end $$;
+
+do $$
+declare
+  addr jsonb := '{"name":"G","line1":"1 St","city":"Chennai",
+                  "state":"Tamil Nadu","postal_code":"560001","country":"IN"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000003","quantity":1},
+                   {"variant_id":"d0000000-0000-4000-8000-000000000004","quantity":2}]'::jsonb;
+  oid uuid; ot numeric; it numeric; ig numeric;
+begin
+  oid := (checkout('inv-k6', 'hash-6', 'g@example.com', '+919876543210',
+                   items, addr, 'cod') ->> 'order_id')::uuid;
+  update orders set status = 'paid' where id = oid;
+
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform admin_issue_invoice(oid, '33');   -- Tamil Nadu
+
+  select o.grand_total, i.grand_total, i.igst_total into ot, it, ig
+  from orders o join invoices i on i.order_id = o.id where o.id = oid;
+
+  -- The same supply, billed inter-state, must come to the same money.
+  -- It did not before 0014: IGST rounded at the full rate while CGST and
+  -- SGST rounded at half, so the two modes could differ by a paisa.
+  if ot <> it then
+    raise exception 'FAIL  inter-state invoice totals % against an order of %', it, ot;
+  end if;
+  if ig = 0 then
+    raise exception 'FAIL  an inter-state invoice charged no IGST';
+  end if;
+  raise notice 'PASS  checkout + invoice -- inter-state bills the same total as intra-state';
 end $$;
 
 -- ============================================================
