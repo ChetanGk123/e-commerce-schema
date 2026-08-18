@@ -64,12 +64,16 @@ supabase/
                           indexes         access paths
                           views_rls_grants  storefront views + Row Level Security
                           auth_signup     auth.users -> customers on signup (Supabase only)
+    ..._admin_rpc       operations that must be atomic (capture, ship, invoice)
+    ..._catalog         search_products, shipping_quote
   jobs/retention.sql    scheduled sweepers (NOT a migration)
   seed.sql              demo data
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
-    01_invariants.sql   38 assertions
+    01_invariants.sql   43 assertions
 types/                  TypeScript types — regenerate with `make types`
+apps/api/               the shared backend — see apps/api/README.md
+                        browsable at /docs, importable from /openapi.json
 ```
 
 ## The identity contract

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@ecom/schema": "workspace:*",
+    "@hono/swagger-ui": "^0.6.1",
     "@hono/zod-openapi": "^0.19.0",
     "@supabase/supabase-js": "^2",
     "hono": "^4",

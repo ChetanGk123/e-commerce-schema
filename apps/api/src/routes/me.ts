@@ -21,6 +21,7 @@ const me = createRoute({
   description:
     "The admin shell calls this to resolve the signed-in staff member and gate its nav. A customer's token is valid auth but has no staff_users row, so it answers 403 -- that missing row is the only thing keeping shoppers out of the admin surface.",
   middleware: [requireAuth, requireStaff] as const,
+  security: [{ bearerAuth: [] }],
   responses: {
     200: {
       description: "Caller resolved",

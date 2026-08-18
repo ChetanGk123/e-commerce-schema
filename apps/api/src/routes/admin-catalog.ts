@@ -165,6 +165,7 @@ const listProducts = createRoute({
   description:
     "Every status, with cost price and stock. `q` is the same typo-tolerant search the storefront uses; `sku` is an exact-substring match, which is what someone holding a physical label actually wants.",
   middleware: [requireAuth, requireStaff] as const,
+  security: [{ bearerAuth: [] }],
   request: {
     query: z.object({
       q: z.string().trim().min(2).max(80).optional(),
@@ -190,6 +191,7 @@ const getProduct = createRoute({
   tags: ["admin", "catalog"],
   summary: "One product, everything the editor needs",
   middleware: [requireAuth, requireStaff] as const,
+  security: [{ bearerAuth: [] }],
   request: { params: z.object({ id: z.string().uuid() }) },
   responses: {
     200: {

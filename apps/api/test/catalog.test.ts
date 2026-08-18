@@ -95,6 +95,30 @@ describe("B4 route contract", () => {
   });
 });
 
+describe("browsable docs", () => {
+  test("/docs serves Swagger UI", async () => {
+    const res = await app.request("/docs");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+  });
+
+  test("the bearer scheme is declared, so Swagger shows an Authorize button", async () => {
+    const d = (await doc()) as unknown as {
+      components: { securitySchemes?: Record<string, unknown> };
+      paths: Record<string, Record<string, { security?: unknown[] }>>;
+    };
+    expect(d.components.securitySchemes?.bearerAuth).toBeDefined();
+
+    // A protected route with no `security` renders with no way to send a
+    // token, which reads as broken rather than guarded.
+    for (const p of ["/me", "/admin/products", "/admin/products/{id}"]) {
+      expect(d.paths[p]?.get?.security).toBeDefined();
+    }
+    // ...and a public one must not ask for a token it does not need.
+    expect(d.paths["/catalog/products"]?.get?.security).toBeUndefined();
+  });
+});
+
 describe("B4 admin catalog is behind auth", () => {
   test.each([
     ["/admin/products"],

@@ -1,3 +1,4 @@
+import { swaggerUI } from "@hono/swagger-ui";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
@@ -28,6 +29,21 @@ const routes = app
   .route("/", adminCatalogRoute)
   .route("/", shippingRoute);
 
+/**
+ * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes
+ * opt in with `security: [{ bearerAuth: [] }]`; without that a protected route
+ * renders with no way to send a token and looks broken rather than guarded.
+ *
+ * It documents the requirement. It does not enforce it -- requireAuth does.
+ */
+app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
+  type: "http",
+  scheme: "bearer",
+  bearerFormat: "JWT",
+  description:
+    "A Supabase access token. Get one from GoTrue: POST {SUPABASE_URL}/auth/v1/token?grant_type=password with the apikey header set to the anon key. Paste the access_token here, without the word Bearer.",
+});
+
 app.doc("/openapi.json", {
   openapi: "3.1.0",
   info: {
@@ -37,6 +53,18 @@ app.doc("/openapi.json", {
       "Shared backend for the admin console and storefront. Request schemas come from @ecom/schema, so validation, types, this document and the hc client all derive from one source.",
   },
 });
+
+/**
+ * Browsable docs at /docs, and the same document Postman imports.
+ *
+ * Both are public, as they already were. The admin surface is protected by
+ * requireStaff and RLS, not by being unlisted -- but if you would rather not
+ * publish the route map, this is the line to wrap in an env check.
+ *
+ * Swagger UI itself loads from a CDN, so /docs needs internet. /openapi.json
+ * does not, and it is the one Postman and codegen actually consume.
+ */
+app.get("/docs", swaggerUI({ url: "/openapi.json" }));
 
 app.onError((err, c) => {
   const requestId = c.get("reqId");
