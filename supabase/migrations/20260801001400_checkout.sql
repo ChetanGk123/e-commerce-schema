@@ -21,6 +21,19 @@
 -- If these migrations are ever applied by a role WITHOUT BYPASSRLS,
 -- checkout will start failing with row-level security errors rather
 -- than doing something quietly wrong.
+--
+-- ERROR CONVENTION
+--
+-- Every refusal below carries a SQLSTATE Postgres itself never raises:
+--
+--     ECOM1  the request is wrong      -> the API answers 422
+--     ECOM2  the request conflicts     -> the API answers 409
+--
+-- with a machine-readable `hint` and a message written for a customer.
+-- That is what lets apps/api forward these strings verbatim while still
+-- refusing to forward anything Postgres wrote: the SQLSTATE is proof of
+-- authorship, so 'Coupon DIWALI20 is not valid.' reaches the shopper and
+-- 'violates check constraint "orders_totals_balance"' never can.
 -- ============================================================
 
 begin;
@@ -123,11 +136,12 @@ declare
   res       jsonb;
 begin
   if p_payment_method not in ('razorpay', 'cod') then
-    raise exception 'unsupported payment method %', p_payment_method
-      using errcode = '22023';
+    raise exception 'That payment method is not supported.'
+      using errcode = 'ECOM1', hint = 'unsupported_payment_method';
   end if;
   if jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
-    raise exception 'your cart is empty' using errcode = '22023';
+    raise exception 'Your cart is empty.'
+      using errcode = 'ECOM1', hint = 'cart_empty';
   end if;
 
   -- 1. Claim the idempotency key FIRST.
@@ -146,12 +160,12 @@ begin
     -- Same key, different body is a client bug. Replaying the first
     -- response would hide it and charge for the wrong basket.
     if ik.request_hash is distinct from p_request_hash then
-      raise exception 'this idempotency key was already used for a different request'
-        using errcode = '22023';
+      raise exception 'This request was already submitted with a different basket.'
+        using errcode = 'ECOM2', hint = 'idempotency_key_conflict';
     end if;
     if ik.completed_at is null then
-      raise exception 'a checkout with this key is still in flight'
-        using errcode = '55006';
+      raise exception 'That checkout is still being processed. Try again in a moment.'
+        using errcode = 'ECOM2', hint = 'checkout_in_flight';
     end if;
     return ik.response_body;
   end if;
@@ -180,8 +194,8 @@ begin
   -- A short count means something in the basket is archived, draft or
   -- gone. Naming which would let anyone enumerate unreleased products.
   if v_lines is null or n_items <> jsonb_array_length(p_items) then
-    raise exception 'one or more items are no longer available'
-      using errcode = 'P0002';
+    raise exception 'One or more items in your cart are no longer available.'
+      using errcode = 'ECOM2', hint = 'items_unavailable';
   end if;
 
   -- 3. Coupon. Locked, because max_uses is enforced by a counter and
@@ -197,11 +211,13 @@ begin
     -- One message for expired, inactive and non-existent alike: three
     -- messages is a way to enumerate live codes.
     if not found then
-      raise exception 'coupon % is not valid', p_coupon_code using errcode = 'P0002';
+      raise exception 'Coupon % is not valid.', p_coupon_code
+        using errcode = 'ECOM1', hint = 'invalid_coupon';
     end if;
     if d.min_order_total is not null and subtotal < d.min_order_total then
-      raise exception 'coupon % needs an order of at least %',
-        p_coupon_code, d.min_order_total using errcode = '55000';
+      raise exception 'Coupon % needs an order of at least %.',
+        p_coupon_code, d.min_order_total
+        using errcode = 'ECOM1', hint = 'coupon_minimum_not_met';
     end if;
 
     select coalesce(sum((e ->> 'line_total')::numeric), 0) into eligible
@@ -222,8 +238,8 @@ begin
     end if;
 
     if discount = 0 and d.kind <> 'free_shipping' then
-      raise exception 'coupon % does not apply to anything in this order',
-        p_coupon_code using errcode = '55000';
+      raise exception 'Coupon % does not apply to anything in this order.',
+        p_coupon_code using errcode = 'ECOM1', hint = 'coupon_not_applicable';
     end if;
   end if;
 
@@ -233,8 +249,8 @@ begin
   pin := p_shipping_address ->> 'postal_code';
   select * into q from shipping_quote(pin, weight_g, subtotal - discount);
   if not found then
-    raise exception 'we do not deliver to %', coalesce(pin, '(no pincode)')
-      using errcode = '55000';
+    raise exception 'We do not deliver to %.', coalesce(pin, 'that pincode')
+      using errcode = 'ECOM1', hint = 'not_serviceable';
   end if;
 
   shipping := q.rate;
@@ -262,12 +278,12 @@ begin
 
   if p_payment_method = 'cod' then
     if jsonb_array_length(flags) > 0 then
-      raise exception 'cash on delivery is not available for this order'
-        using errcode = '55000';
+      raise exception 'Cash on delivery is not available for this order.'
+        using errcode = 'ECOM1', hint = 'cod_unavailable';
     end if;
     if not q.cod_allowed then
-      raise exception 'cash on delivery is not available for %', pin
-        using errcode = '55000';
+      raise exception 'Cash on delivery is not available for %.', pin
+        using errcode = 'ECOM1', hint = 'cod_unavailable';
     end if;
     shipping := shipping + q.cod_surcharge;
   end if;

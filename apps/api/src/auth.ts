@@ -1,5 +1,6 @@
 import type { StaffRole } from "@ecom/schema/enums";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
 import { jwtVerify } from "jose";
@@ -42,13 +43,36 @@ declare module "hono" {
  * decide what you may do -- that is requireStaff / requireRole below.
  */
 export const requireAuth = createMiddleware(async (c, next) => {
-  const header = c.req.header("Authorization");
-  const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+  const token = bearer(c);
 
   if (!token) {
     throw new HTTPException(401, { message: "Missing bearer token" });
   }
 
+  await establish(c, token);
+  await next();
+});
+
+/**
+ * Auth if you have it, guest if you do not.
+ *
+ * For the surfaces a shopper reaches before signing in -- the cart, and
+ * checkout itself. A *present but broken* token is still a 401: silently
+ * demoting an expired session to a guest would hand the customer someone
+ * else's empty cart and place their order against no account.
+ */
+export const optionalAuth = createMiddleware(async (c, next) => {
+  const token = bearer(c);
+  if (token) await establish(c, token);
+  await next();
+});
+
+function bearer(c: Context): string | undefined {
+  const header = c.req.header("Authorization");
+  return header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+}
+
+async function establish(c: Context, token: string): Promise<void> {
   let userId: string;
   try {
     const { payload } = await jwtVerify(token, secret, {
@@ -67,9 +91,7 @@ export const requireAuth = createMiddleware(async (c, next) => {
 
   c.set("caller", { userId, token, db: callerClient(token), staff: null });
   c.get("log")?.debug({ userId }, "auth.ok");
-
-  await next();
-});
+}
 
 /**
  * 403: we know who you are, and it is not staff.

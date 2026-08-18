@@ -6,7 +6,9 @@ import { type DbError, mapDatabaseError } from "./errors";
 import { requestLogger } from "./logger";
 import { validationHook } from "./schemas";
 import { adminCatalogRoute } from "./routes/admin-catalog";
+import { cartRoute } from "./routes/cart";
 import { catalogRoute } from "./routes/catalog";
+import { checkoutRoute } from "./routes/checkout";
 import { healthRoute } from "./routes/health";
 import { meRoute } from "./routes/me";
 import { shippingRoute } from "./routes/shipping";
@@ -27,7 +29,9 @@ const routes = app
   .route("/", meRoute)
   .route("/", catalogRoute)
   .route("/", adminCatalogRoute)
-  .route("/", shippingRoute);
+  .route("/", shippingRoute)
+  .route("/", cartRoute)
+  .route("/", checkoutRoute);
 
 /**
  * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes

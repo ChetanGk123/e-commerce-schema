@@ -73,6 +73,11 @@ export const checkoutSchema = z.object({
     .array(z.object({ variant_id: uuid, quantity: qty.max(99) }))
     .min(1, 'Your cart is empty')
     .max(50),
+  // Required, including for guests: orders.email is NOT NULL because an order
+  // has to stay contactable when there is no customer row behind it — and
+  // after anonymize_customer() there is no longer one behind a member order
+  // either. A signed-in checkout should prefill this from the account.
+  email: z.string().email('Enter a valid email address').max(254),
   shipping_address: addressSchema,
   contact_phone: phone,
   payment_method: z.enum(['razorpay', 'cod']),

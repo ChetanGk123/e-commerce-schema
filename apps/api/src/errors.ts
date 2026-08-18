@@ -269,6 +269,20 @@ export function mapDatabaseError(
     };
   }
 
+  // Refusals our own functions raised, with a SQLSTATE Postgres never
+  // uses. These messages were written for a customer -- "Coupon DIWALI20
+  // is not valid." -- and the SQLSTATE is what proves it: a constraint
+  // violation cannot arrive wearing one, so forwarding these does not
+  // reopen the door to forwarding Postgres's own words. `hint` carries
+  // the machine code so the client can highlight the right field.
+  if (err.code === "ECOM1" || err.code === "ECOM2") {
+    return {
+      status: err.code === "ECOM2" ? 409 : 422,
+      code: err.hint ?? "request_refused",
+      message: err.message ?? "That request cannot be completed.",
+    };
+  }
+
   for (const rule of RULES) {
     if (haystack.includes(rule.match.toLowerCase())) {
       return { status: rule.status, code: rule.code, message: rule.message };

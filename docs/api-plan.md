@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B4 done, B5 next`
+**Status**: `B0-B5 done, B6 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -240,10 +240,38 @@ did not have before — every 400 was answering with raw `ZodError` internals.
 
 ### B5 — Cart & checkout · **High**
 
-- [ ] Cart CRUD; guest carts by `session_id`, logged-in by `customer_id`
-- [ ] Checkout in **one transaction**, ordered per `docs/schema_guide.md:377`: idempotency key **first** → reservation (with `expires_at`) → order → items → redemption → outbox message → store response
-- [ ] Prices, totals and discounts recomputed server-side from the DB
-- [ ] **Validate**: replay the same idempotency key → same response, one order; oversell → 409; a spent coupon → 409
+- [x] Cart CRUD; guest carts by `session_id`, logged-in by `customer_id`
+- [x] Checkout in **one transaction**: idempotency key **first** → order → items → reservation (with `expires_at`) → redemption → payment → outbox message → store response
+- [x] Prices, totals and discounts recomputed server-side from the DB
+- [x] **Validate**: replay the same idempotency key → same response, one order; oversell → 409; a spent coupon → 409
+
+**Decided here.**
+
+*The order is inserted before the reservations*, not after as `schema_guide` §20
+shows. `inventory_movements` is append-only, so `order_id` cannot be filled in
+later, and `admin_capture_cod` finds its reservations by `order_id`. Same
+transaction either way, so the oversell guard is untouched.
+
+*Guest carts run on the service key.* The schema says why in as many words —
+there is no trustworthy session identity in a JWT-less request, so `carts` has
+no policy for `anon`. `X-Cart-Session` is therefore a **bearer credential**, not
+an identifier: server-generated, never derived from client input, worth exactly
+one anonymous basket. It must never be logged or put in a URL. This is a fifth
+service-key path beyond the four in the Hosting section.
+
+*Checkout must NOT use the service key.* `checkout()` takes the customer from
+`auth.uid()`; on the service key that is null and every order silently becomes a
+guest order — no `customer_id`, invisible in "my orders", unattached to the
+account that paid.
+
+*Refusals carry SQLSTATEs Postgres never raises* — `ECOM1` → 422, `ECOM2` → 409 —
+with a machine code in `hint` and customer-facing copy in the message. That
+SQLSTATE is proof of authorship, which is what lets `apps/api` forward these
+strings verbatim while still refusing to forward anything Postgres wrote.
+
+*Beyond the four bullets*: the COD blocklist is now consulted at checkout and
+sets `risk_flags`. Nothing else in the plan referenced that table, and it exists
+for exactly this.
 
 ### B6 — Payments & webhooks · **High**
 
@@ -366,7 +394,7 @@ admin's read-only screens.
 | B2 Errors | **done** | 28 rules, real-message fixtures |
 | B3 RPC migration | **done** | `20260801001200_admin_rpc.sql` |
 | B4 Catalog reads | **done** | `20260801001300_catalog.sql`; storefront on the anon role |
-| B5 Cart & checkout | not started | |
+| B5 Cart & checkout | **done** | `20260801001400_checkout.sql`; guest carts on the service key |
 | B6 Payments & webhooks | not started | |
 | B7 Inventory & fulfilment | not started | |
 | B8 Returns & money | not started | |

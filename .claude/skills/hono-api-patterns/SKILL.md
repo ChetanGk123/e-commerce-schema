@@ -67,9 +67,14 @@ apps/api/
 6. **Every router is `new OpenAPIHono({ defaultHook: validationHook })`.** Without
    it a 400 answers with `{ success: false, error: { issues: [...] } }` --
    a different envelope from every other failure, with no `code` to branch on.
-7. **Never return `err.message` to a caller.** Constraint names, SQL fragments
-   and table structure are all reconnaissance. Log the detail under the request
-   id and answer with a mapped message or a support code.
+7. **Never return `err.message` to a caller** -- with exactly one exception.
+   Constraint names, SQL fragments and table structure are all reconnaissance,
+   so the detail goes to the log under the request id and the caller gets a
+   mapped message or a support code. The exception is a refusal raised with
+   SQLSTATE `ECOM1` (-> 422) or `ECOM2` (-> 409). Postgres never emits those,
+   so the SQLSTATE proves *we* wrote the message; `hint` carries the machine
+   code. Raise them from SQL when the copy belongs beside the rule that
+   decided it -- `checkout()` does.
 8. **Validate input with `@ecom/schema`.** Money and stock are recomputed
    server-side from the database regardless of what the body claims.
 9. **Tests run in-process** through `app.request()`: no port, no network, no
@@ -84,13 +89,23 @@ This is the decision most likely to be got wrong, and it is silent when it is.
 |---|---|---|
 | Anything a staff member does as themselves | `callerClient(token)` | RLS applies and `auth.uid()` is populated, so `audit_logs.staff_id` is attributed |
 | Public storefront reads (`/catalog`, `/shipping`) | `anonClient()` | The public view of the catalog, identically for everyone. RLS's `public_read` policies do the scoping |
-| Checkout, payment capture, webhooks, creating staff auth users | `serviceClient()` | Needs to read prices the client must not choose, or act with no user present |
+| Guest carts (no token at all) | `serviceClient()` | `carts` has no policy for `anon`; the schema says a JWT-less session identity cannot be trusted to RLS |
+| Payment capture, webhooks, creating staff auth users | `serviceClient()` | Acts with no user present |
 | Anything else | `callerClient(token)` | Default to the caller |
 
 Storefront routes use `anonClient()` **even when the caller is signed in**. Forwarding a
 staff token to `/catalog` would show drafts on the public storefront; forwarding a
 customer's changes nothing, because the policies are identical for `anon` and
 `authenticated`. Determinism is worth more than the token.
+
+**`/checkout` is not on the service key,** despite writing orders. `checkout()` is
+SECURITY DEFINER and reads the customer from `auth.uid()`, so the caller's token has to
+reach Postgres — signed in it is `caller.db`, guest it is `anonClient()`. On the service
+key `auth.uid()` is null and every order becomes a guest order: no `customer_id`,
+invisible in "my orders", unattached to the account that paid. Nothing errors.
+
+`X-Cart-Session` is a **bearer credential**, not an identifier. Generate it server-side,
+never echo a client-supplied one back as the cart's own id, and never log it.
 
 `audit_row()` reads `auth.uid()`. Run a staff write on the service key and the
 row is recorded anonymously — proven in this repo: the same `UPDATE` produced
@@ -101,8 +116,13 @@ in capability.
 ## Auth
 
 `requireAuth` → 401, "we do not know who you are".
+`optionalAuth` → guest if there is no token, **401 if there is a broken one**.
 `requireStaff` → 403, "we know, and it is not staff".
 `requireRole(...)` → 403, wrong role.
+
+`optionalAuth` is for the surfaces a shopper reaches before signing in — the cart and
+checkout. Demoting an expired token to a guest instead of answering 401 would hand the
+customer an empty cart and place their order against no account.
 
 A customer's token is **valid auth**. The missing `staff_users` row is the only
 thing keeping shoppers off the admin surface, so `requireStaff` is load-bearing.
