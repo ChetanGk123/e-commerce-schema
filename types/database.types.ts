@@ -734,6 +734,24 @@ export interface CustomerCreditBalance {
   balance: number | null;
 }
 
+export interface AdminSalesDaily {
+  day: string | null;
+  orders: number | null;
+  revenue: number | null;
+  discounts: number | null;
+  average_order_value: number | null;
+}
+
+export interface AdminLowStock {
+  variant_id: string | null;
+  product_id: string | null;
+  product_name: string | null;
+  sku: string | null;
+  title: string | null;
+  stock: number | null;
+  low_stock_threshold: number | null;
+}
+
 /* ---------- Name -> row type, for generic helpers ---------- */
 
 export interface Tables {
@@ -791,6 +809,8 @@ export interface Tables {
   storefront_variants: StorefrontVariant;
   public_settings: PublicSettings;
   customer_credit_balances: CustomerCreditBalance;
+  admin_sales_daily: AdminSalesDaily;
+  admin_low_stock: AdminLowStock;
 }
 
 export type TableName = keyof Tables;

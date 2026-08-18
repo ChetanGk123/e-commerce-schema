@@ -625,25 +625,30 @@ Read variants through `storefront_variants`, not `product_variants` — the view
 Fuzzy search, no external infrastructure:
 
 ```sql
-select id, name from products
-where status = 'active' and name % $1        -- 'iphone chrger' finds 'iPhone charger'
-order by similarity(name, $1) desc limit 20;
+select * from search_products('iphone chrger');   -- finds 'iPhone charger'
 ```
+
+`search_products` is SECURITY INVOKER, so RLS decides what comes back: a shopper gets active products, a staff member gets drafts too, from the same call.
+
+It uses `word_similarity`, not `similarity`. `similarity()` compares whole strings, so `similarity('macbook', 'MacBook Air 13-inch M3')` is low and the obvious answer never appears. It also pins `pg_trgm.word_similarity_threshold` to 0.35 for the call — the 0.6 default rejects `word_similarity('aple','Apple') = 0.571`, which is the most ordinary typo there is.
 
 "Deliver to 560001?", and what it costs:
 
 ```sql
-select sp.cod_allowed, sr.rate, sr.cod_surcharge, sr.delivery_days
-from serviceable_pincodes sp
-join shipping_rates sr on sr.zone_id = sp.zone_id and sr.is_active
-where sp.pincode = '560001'
-  and $1 between sr.min_weight_grams
-              and coalesce(sr.max_weight_grams, 2147483647)
-  and $2 >= sr.min_order_total
-  and ($2 < sr.max_order_total or sr.max_order_total is null);
+select * from shipping_quote('560001', 450, 1200.00);
+--                            pincode  grams  basket value
 ```
 
-That returns at most one row — rate bands cannot overlap. If it returns none, fall back to `store_settings.flat_shipping_rate`.
+No rows means not serviceable. Otherwise exactly one row, carrying the rate, the COD surcharge, delivery days, and whether free shipping applied.
+
+Use the function rather than writing the join yourself. The band predicate has to be **half-open on both axes**, matching the `[)` ranges in `rates_no_overlap`:
+
+```sql
+  and $1 >= sr.min_weight_grams
+  and (sr.max_weight_grams is null or $1 <  sr.max_weight_grams)
+```
+
+An earlier version of this page used `BETWEEN min AND coalesce(max, 2147483647)`, which is inclusive at the top. With bands `[0,500)` and `[500,2000)` a 500g parcel matched **both**, and the price the customer saw depended on the plan. The exclusion constraint was doing its job; the query was not.
 
 ---
 

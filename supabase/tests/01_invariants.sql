@@ -375,6 +375,72 @@ begin
 end $$;
 
 -- ============================================================
+-- Catalog reads (0013): search and shipping quotes
+-- ============================================================
+
+insert into shipping_zones (id, name)
+values ('b1000000-0000-4000-8000-000000000001', 'Test Zone');
+
+insert into serviceable_pincodes (pincode, zone_id, cod_allowed)
+values ('560001', 'b1000000-0000-4000-8000-000000000001', true);
+
+-- Two bands sharing the 500g edge. rates_no_overlap accepts both
+-- because its ranges are half-open; a lookup using BETWEEN would
+-- match both and charge whichever the planner returned first.
+insert into shipping_rates
+  (zone_id, min_weight_grams, max_weight_grams, rate, delivery_days)
+values
+  ('b1000000-0000-4000-8000-000000000001',   0,  500, 40.00, 3),
+  ('b1000000-0000-4000-8000-000000000001', 500, 2000, 80.00, 4);
+
+do $$
+declare r record;
+begin
+  select count(*) as n, min(rate) as rate into r
+  from shipping_quote('560001', 500, 0);
+  if r.n <> 1 then
+    raise exception 'FAIL  shipping_quote matched % bands at the 500g boundary -- must be exactly 1', r.n;
+  end if;
+  if r.rate <> 80.00 then
+    raise exception 'FAIL  shipping_quote took the wrong band at 500g (rate %)', r.rate;
+  end if;
+  raise notice 'PASS  shipping_quote matches exactly one band on a shared boundary';
+end $$;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from shipping_quote('999999', 100, 0);
+  if n <> 0 then
+    raise exception 'FAIL  shipping_quote quoted an unserviceable pincode';
+  end if;
+  raise notice 'PASS  shipping_quote answers an unserviceable pincode with no rows';
+end $$;
+
+-- 'labtop' vs 'Test Laptop' scores 0.571: below pg_trgm's default word
+-- similarity threshold of 0.6, above the 0.35 the function pins. This
+-- fails if that set_config is ever dropped.
+do $$
+declare n int;
+begin
+  select count(*) into n from search_products('labtop');
+  if n < 1 then
+    raise exception 'FAIL  search_products did not match "labtop" to "Test Laptop"';
+  end if;
+  raise notice 'PASS  search_products is typo-tolerant (threshold is pinned, not inherited)';
+end $$;
+
+do $$
+declare n int;
+begin
+  select count(*) into n from search_products('%%');
+  if n <> 0 then
+    raise exception 'FAIL  search_products read "%%" as a wildcard and returned % rows', n;
+  end if;
+  raise notice 'PASS  search_products escapes LIKE wildcards in the query string';
+end $$;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 
@@ -419,6 +485,19 @@ begin
     raise exception 'FAIL  customer can see % orders that are not theirs', n;
   end if;
   raise notice 'PASS  RLS -- a customer sees none of another customer''s orders';
+end $$;
+
+-- search_products is SECURITY INVOKER precisely so this holds: one
+-- function serves the storefront and the admin, and RLS -- not a role
+-- flag in the API -- decides which rows come back.
+do $$
+declare n int;
+begin
+  select count(*) into n from search_products('phone') where status <> 'active';
+  if n <> 0 then
+    raise exception 'FAIL  search_products returned % non-active product(s) to a customer', n;
+  end if;
+  raise notice 'PASS  search_products -- a draft product is invisible to a customer';
 end $$;
 
 reset role;

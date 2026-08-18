@@ -15,6 +15,25 @@ import { env } from "./env";
  * recorded anonymously. The staff_all policy already grants active staff full
  * access, so forwarding the JWT costs nothing in capability.
  */
+/**
+ * A client acting as nobody -- role `anon`.
+ *
+ * The storefront catalog uses this unconditionally, even when the caller
+ * happens to be signed in. The point is that /catalog answers the same way for
+ * everyone: RLS's public_read policies decide what exists, so a draft product
+ * is invisible and product_variants (which carries cost_price) is unreachable
+ * no matter what the select list says. Forwarding a staff token here would
+ * quietly widen the storefront to unpublished rows.
+ */
+let anon: SupabaseClient | undefined;
+
+export function anonClient(): SupabaseClient {
+  anon ??= createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  return anon;
+}
+
 export function callerClient(accessToken: string): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: `Bearer ${accessToken}` } },

@@ -64,12 +64,15 @@ apps/api/
    `responses`. An undocumented status is a client that cannot handle it.
 5. **Middleware via `createMiddleware`** from `hono/factory`, with anything it
    sets declared on `ContextVariableMap` so `c.get()` stays typed.
-6. **Never return `err.message` to a caller.** Constraint names, SQL fragments
+6. **Every router is `new OpenAPIHono({ defaultHook: validationHook })`.** Without
+   it a 400 answers with `{ success: false, error: { issues: [...] } }` --
+   a different envelope from every other failure, with no `code` to branch on.
+7. **Never return `err.message` to a caller.** Constraint names, SQL fragments
    and table structure are all reconnaissance. Log the detail under the request
    id and answer with a mapped message or a support code.
-7. **Validate input with `@ecom/schema`.** Money and stock are recomputed
+8. **Validate input with `@ecom/schema`.** Money and stock are recomputed
    server-side from the database regardless of what the body claims.
-8. **Tests run in-process** through `app.request()`: no port, no network, no
+9. **Tests run in-process** through `app.request()`: no port, no network, no
    database. Mirror `supabase/tests/01_invariants.sql` — assert the thing
    *refuses*, not just that the happy path works.
 
@@ -80,8 +83,14 @@ This is the decision most likely to be got wrong, and it is silent when it is.
 | Situation | Client | Why |
 |---|---|---|
 | Anything a staff member does as themselves | `callerClient(token)` | RLS applies and `auth.uid()` is populated, so `audit_logs.staff_id` is attributed |
+| Public storefront reads (`/catalog`, `/shipping`) | `anonClient()` | The public view of the catalog, identically for everyone. RLS's `public_read` policies do the scoping |
 | Checkout, payment capture, webhooks, creating staff auth users | `serviceClient()` | Needs to read prices the client must not choose, or act with no user present |
 | Anything else | `callerClient(token)` | Default to the caller |
+
+Storefront routes use `anonClient()` **even when the caller is signed in**. Forwarding a
+staff token to `/catalog` would show drafts on the public storefront; forwarding a
+customer's changes nothing, because the policies are identical for `anon` and
+`authenticated`. Determinism is worth more than the token.
 
 `audit_row()` reads `auth.uid()`. Run a staff write on the service key and the
 row is recorded anonymously — proven in this repo: the same `UPDATE` produced
@@ -127,6 +136,9 @@ line outlives the request and lands in every backup of the log store.
 | Start a server in `app.ts` | Keep it in `server.ts` | Importing `AppType` would bind a port |
 | Test by booting a server on a port | `app.request()` | Slower, flakier, needs a free port |
 | Different 401 messages per failure mode | One message | Free oracle for attackers |
+| `new OpenAPIHono()` bare | Pass `defaultHook: validationHook` | 400s answer in a different envelope |
+| Re-declaring `ErrorResponse` per route file | Import from `schemas.ts` | `.openapi("ErrorResponse")` may register the name once |
+| Money arithmetic in the handler | Compute it in SQL | A cart and an invoice a paisa apart |
 
 ## Adding a route
 

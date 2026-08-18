@@ -3,21 +3,30 @@ import { HTTPException } from "hono/http-exception";
 
 import { type DbError, mapDatabaseError } from "./errors";
 import { requestLogger } from "./logger";
+import { validationHook } from "./schemas";
+import { adminCatalogRoute } from "./routes/admin-catalog";
+import { catalogRoute } from "./routes/catalog";
 import { healthRoute } from "./routes/health";
 import { meRoute } from "./routes/me";
+import { shippingRoute } from "./routes/shipping";
 
 /**
  * The app is built here and served in server.ts. Keeping them apart means
  * importing AppType (for hc) or calling app.request() in a test does not bind
  * a port as a side effect of the import.
  */
-export const app = new OpenAPIHono();
+export const app = new OpenAPIHono({ defaultHook: validationHook });
 
 app.use("*", requestLogger);
 
-// Every route mounts here. B2 replaces the generic handler below with the
-// constraint-name -> message mapping from docs/schema_guide.md.
-const routes = app.route("/", healthRoute).route("/", meRoute);
+// Every route mounts here. The chained .route() calls are what extend
+// AppType, so hc<AppType> in the front ends knows about each one.
+const routes = app
+  .route("/", healthRoute)
+  .route("/", meRoute)
+  .route("/", catalogRoute)
+  .route("/", adminCatalogRoute)
+  .route("/", shippingRoute);
 
 app.doc("/openapi.json", {
   openapi: "3.1.0",

@@ -1,5 +1,7 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 
+import { validationHook } from "../schemas";
+
 const HealthResponse = z
   .object({
     status: z.literal("ok"),
@@ -23,7 +25,7 @@ const health = createRoute({
   },
 });
 
-export const healthRoute = new OpenAPIHono().openapi(health, (c) =>
+export const healthRoute = new OpenAPIHono({ defaultHook: validationHook }).openapi(health, (c) =>
   // No env values here on purpose: a health endpoint that echoes config is a
   // config leak reachable without auth.
   c.json(

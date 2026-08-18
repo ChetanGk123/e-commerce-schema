@@ -2,6 +2,7 @@ import { STAFF_ROLES } from "@ecom/schema/enums";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 
 import { requireAuth, requireStaff } from "../auth";
+import { jsonError, validationHook } from "../schemas";
 
 const MeResponse = z
   .object({
@@ -11,16 +12,6 @@ const MeResponse = z
     fullName: z.string().nullable(),
   })
   .openapi("MeResponse");
-
-const ErrorResponse = z
-  .object({
-    error: z.object({
-      code: z.string(),
-      message: z.string(),
-      requestId: z.string().optional(),
-    }),
-  })
-  .openapi("ErrorResponse");
 
 const me = createRoute({
   method: "get",
@@ -35,18 +26,12 @@ const me = createRoute({
       description: "Caller resolved",
       content: { "application/json": { schema: MeResponse } },
     },
-    401: {
-      description: "Missing or invalid token",
-      content: { "application/json": { schema: ErrorResponse } },
-    },
-    403: {
-      description: "Authenticated, but not active staff",
-      content: { "application/json": { schema: ErrorResponse } },
-    },
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
   },
 });
 
-export const meRoute = new OpenAPIHono().openapi(me, (c) => {
+export const meRoute = new OpenAPIHono({ defaultHook: validationHook }).openapi(me, (c) => {
   const { userId, staff } = c.get("caller");
   return c.json(
     {

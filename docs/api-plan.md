@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B3 done, B4 next`
+**Status**: `B0-B4 done, B5 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -214,10 +214,29 @@ forwarded. `bun test` 12/12.
 
 ### B4 — Catalog reads · Medium
 
-- [ ] Products, variants, options, categories, collections; storefront reads `storefront_variants`, admin reads base tables
-- [ ] Search via `pg_trgm` (`idx_products_name_trgm`, `idx_variants_sku_trgm`)
-- [ ] Pincode serviceability + shipping rate lookup (`docs/schema_guide.md:634`)
-- [ ] **Validate**: a storefront-scoped call never returns `cost_price`; a draft product is invisible to it
+- [x] Products, variants, options, categories, collections; storefront reads `storefront_variants`, admin reads base tables
+- [x] Search via `pg_trgm` (`idx_products_name_trgm`, `idx_variants_sku_trgm`)
+- [x] Pincode serviceability + shipping rate lookup
+- [x] **Validate**: a storefront-scoped call never returns `cost_price`; a draft product is invisible to it
+
+**Decided here.** The storefront runs on `anonClient()` — the anon role — even for a
+signed-in caller, so RLS is what scopes it rather than a WHERE clause a handler can
+forget. Forwarding a staff token to `/catalog` would have widened the public storefront
+to unpublished products.
+
+Two functions went into SQL rather than TypeScript, both SECURITY INVOKER so one
+implementation serves the storefront and the admin and RLS decides the difference:
+
+- `search_products` — PostgREST cannot express trigram similarity. It pins
+  `pg_trgm.word_similarity_threshold` per call via `set_config`; the SET clause on the
+  function fails because pg_trgm is not preloaded, so the GUC is a placeholder at DDL
+  time and setting one needs superuser.
+- `shipping_quote` — the rate-band predicate has to mirror `rates_no_overlap`'s
+  half-open ranges exactly. `docs/schema_guide.md` had it as `BETWEEN`, which matched
+  two bands at a shared boundary; corrected there, and now asserted in the invariants.
+
+Validation failures also gained the standard error envelope (`defaultHook`), which they
+did not have before — every 400 was answering with raw `ZodError` internals.
 
 ### B5 — Cart & checkout · **High**
 
@@ -346,7 +365,7 @@ admin's read-only screens.
 | B1 Auth & context | **done** | audit attribution proven end to end |
 | B2 Errors | **done** | 28 rules, real-message fixtures |
 | B3 RPC migration | **done** | `20260801001200_admin_rpc.sql` |
-| B4 Catalog reads | not started | unblocks admin read-only screens |
+| B4 Catalog reads | **done** | `20260801001300_catalog.sql`; storefront on the anon role |
 | B5 Cart & checkout | not started | |
 | B6 Payments & webhooks | not started | |
 | B7 Inventory & fulfilment | not started | |
