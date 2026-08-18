@@ -9,7 +9,9 @@ import { adminCatalogRoute } from "./routes/admin-catalog";
 import { cartRoute } from "./routes/cart";
 import { catalogRoute } from "./routes/catalog";
 import { checkoutRoute } from "./routes/checkout";
+import { fulfilmentRoute } from "./routes/fulfilment";
 import { healthRoute } from "./routes/health";
+import { inventoryRoute } from "./routes/inventory";
 import { meRoute } from "./routes/me";
 import { paymentsRoute } from "./routes/payments";
 import { shippingRoute } from "./routes/shipping";
@@ -35,7 +37,9 @@ const routes = app
   .route("/", cartRoute)
   .route("/", checkoutRoute)
   .route("/", paymentsRoute)
-  .route("/", webhooksRoute);
+  .route("/", webhooksRoute)
+  .route("/", inventoryRoute)
+  .route("/", fulfilmentRoute);
 
 /**
  * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes

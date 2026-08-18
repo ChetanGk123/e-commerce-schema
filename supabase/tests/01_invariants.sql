@@ -775,6 +775,125 @@ begin
 end $$;
 
 -- ============================================================
+-- Inventory and fulfilment (0016)
+-- ============================================================
+
+-- Whoever is running this is staff, for the guarded functions below.
+set local request.jwt.claim.sub = 'b0000000-0000-4000-8000-000000000001';
+
+-- The allow-list is the whole point of record_stock_movement. A 'release'
+-- row consumes a stock hold, so an admin endpoint able to write one is a
+-- way to invent stock out of nothing.
+do $$
+declare bad text;
+begin
+  foreach bad in array array['sale', 'reservation', 'release'] loop
+    begin
+      perform record_stock_movement('d0000000-0000-4000-8000-000000000001',
+                                    1, bad, 'should not be allowed');
+      raise exception 'FAIL  record_stock_movement accepted reason %', bad;
+    exception when others then
+      if sqlerrm like 'FAIL%' then raise; end if;
+    end;
+  end loop;
+  raise notice 'PASS  record_stock_movement -- sale, reservation and release are not receivable by hand';
+end $$;
+
+select must_fail($$
+  select record_stock_movement('d0000000-0000-4000-8000-000000000001',
+                               5, 'purchase', '   ')
+$$, 'record_stock_movement -- a manual movement without a note is refused');
+
+select must_fail($$
+  select record_stock_movement('d0000000-0000-4000-8000-000000000001',
+                               5, 'damage', 'wrong sign')
+$$, 'record_stock_movement -- writing off stock with a positive quantity is refused');
+
+-- created_by is taken from auth.uid(), never from a parameter: there is
+-- no parameter. An adjustment nobody is attached to is one nobody has to
+-- explain.
+do $$
+declare mid uuid; who uuid; before_stock int; after_stock int;
+begin
+  select stock into before_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+
+  mid := record_stock_movement('d0000000-0000-4000-8000-000000000001',
+                               7, 'purchase', 'received 7 from supplier');
+
+  select created_by into who from inventory_movements where id = mid;
+  if who is distinct from 'b0000000-0000-4000-8000-000000000001'::uuid then
+    raise exception 'FAIL  movement attributed to % rather than the caller', who;
+  end if;
+
+  select stock into after_stock from product_variants
+  where id = 'd0000000-0000-4000-8000-000000000001';
+  if after_stock - before_stock <> 7 then
+    raise exception 'FAIL  the ledger moved 7 units but the cache moved %',
+      after_stock - before_stock;
+  end if;
+
+  raise notice 'PASS  record_stock_movement -- attributed to the caller, and the cache follows the ledger';
+end $$;
+
+-- An adjustment that would take a variant negative is refused by the same
+-- CHECK that stops overselling.
+select must_fail($$
+  select record_stock_movement('d0000000-0000-4000-8000-000000000001',
+                               -999999, 'adjustment', 'stock count')
+$$, 'record_stock_movement -- an adjustment cannot take stock below zero');
+
+-- The monitor has to notice a stranded hold, or it is decoration.
+do $$
+declare
+  addr  jsonb := '{"line1":"1 St","city":"B","state":"KA","postal_code":"560001"}'::jsonb;
+  items jsonb := '[{"variant_id":"d0000000-0000-4000-8000-000000000001","quantity":1}]'::jsonb;
+  h jsonb; released int;
+begin
+  perform checkout('inv-h1', 'h', 'g@example.com', '+919876543210',
+                   items, addr, 'razorpay', null, null, -1);   -- already expired
+
+  h := inventory_health();
+  if (h ->> 'stranded_reservations')::int < 1 then
+    raise exception 'FAIL  inventory_health saw no stranded hold when one exists';
+  end if;
+
+  released := release_expired_reservations();
+  if released < 1 then
+    raise exception 'FAIL  the sweeper released % expired holds', released;
+  end if;
+
+  h := inventory_health();
+  if (h ->> 'stranded_reservations')::int <> 0 then
+    raise exception 'FAIL  a hold is still stranded after the sweeper ran: %',
+      h ->> 'stranded_reservations';
+  end if;
+  if h ->> 'last_auto_release' is null then
+    raise exception 'FAIL  the sweeper ran but inventory_health reports no last release';
+  end if;
+
+  raise notice 'PASS  inventory_health -- a stranded hold is seen, swept, and seen to be gone';
+end $$;
+
+-- pg_cron is not installed in the throwaway container, and that must be a
+-- finding rather than an exception -- it is exactly the state the live
+-- database was in.
+do $$
+declare h jsonb;
+begin
+  h := inventory_health();
+  if h ->> 'sweeper_installed' is distinct from 'true' then
+    raise exception 'FAIL  release_expired_reservations() is not installed by the migrations';
+  end if;
+  if (h -> 'sweeper_scheduled') is null then
+    raise exception 'FAIL  inventory_health did not report on scheduling at all';
+  end if;
+  raise notice 'PASS  inventory_health -- reports a missing pg_cron rather than failing on it';
+end $$;
+
+reset request.jwt.claim.sub;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

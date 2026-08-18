@@ -235,7 +235,12 @@ where sp.pincode = '560001'
 
 ### Step 7. Scheduled jobs
 
-Load the sweepers — paste `supabase/jobs/retention.sql` into the SQL Editor.
+Schedule the sweepers — paste `supabase/jobs/retention.sql` into the SQL Editor.
+The functions themselves ship in the migrations you already applied; this file is
+only the `cron.schedule` calls, deliberately, so a deploy never starts a job by
+accident. **Do not skip it**: until it runs, `release_expired_reservations()` never
+fires and every abandoned checkout holds its stock permanently.
+`GET /admin/inventory/health` will tell you which state you are in.
 
 Then enable **pg_cron** (Dashboard → Database → Extensions), and schedule:
 
@@ -329,7 +334,7 @@ need something to provide it.
 createdb mystore
 psql mystore -f supabase/tests/00_shim.sql   # fabricates auth.users + auth.uid()
 psql mystore -f dist/schema.sql
-psql mystore -f supabase/jobs/retention.sql
+psql mystore -f supabase/jobs/retention.sql   # scheduling only; functions are in the migrations
 psql mystore -f supabase/seed.sql            # optional
 ```
 
@@ -399,7 +404,7 @@ Getting these backwards produces failures that read like bad credentials.
 
 ### C4. pg_cron — verify, do not assume
 
-The sweepers in `supabase/jobs/retention.sql` need pg_cron, and a self-hosted image does
+The sweepers need pg_cron, and a self-hosted image does
 not guarantee it is loaded.
 
 ```sql

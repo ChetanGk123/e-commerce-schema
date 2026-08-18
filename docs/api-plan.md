@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B6 done (bar courier/messaging webhooks), B7 next`
+**Status**: `B0-B7 done (bar courier/messaging webhooks), B8 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -320,10 +320,35 @@ detail leaked). Everything on this side of the wire is verified end to end.
 
 ### B7 — Inventory & fulfilment · Medium
 
-- [ ] Movements ledger reads; receive / adjust / damage as plain inserts with `created_by`
-- [ ] Shipments via `admin_ship_order`; low-stock queue (`idx_variants_low_stock`)
-- [ ] Reservation monitor + last run of `release_expired_reservations()`
-- [ ] **Validate**: no endpoint anywhere writes `product_variants.stock`
+- [x] Movements ledger reads; receive / adjust / damage with `created_by`
+- [x] Shipments via `admin_ship_order`; low-stock queue (`idx_variants_low_stock`)
+- [x] Reservation monitor + last run of `release_expired_reservations()`
+- [x] **Validate**: no endpoint anywhere writes `product_variants.stock`
+
+**Found here, and it was live.** `release_expired_reservations()` did not exist
+in the database at all. The sweepers lived in `supabase/jobs/retention.sql`,
+which is not a migration and which nothing applies — so every reservation whose
+payment never landed held its stock permanently, and nothing would ever have
+said so. `inventory_health()` found four stranded holds on its first run.
+
+The function definitions now ship in `20260801001600_inventory.sql`.
+`jobs/retention.sql` keeps only the `cron.schedule` calls, which is the part
+that was always right: *running* a sweeper is an operational decision and must
+not be a side effect of a deploy. Defining one is not.
+
+**Decided here.**
+
+*Manual movements go through `record_stock_movement()`, whose reason allow-list
+refuses `sale`, `reservation` and `release`.* A release row consumes a stock
+hold, so an admin endpoint able to write one could invent stock out of nothing.
+
+*`created_by` comes from `auth.uid()`, and there is no parameter for it.* An
+adjustment nobody is attached to is an adjustment nobody has to explain. The
+note is mandatory for the same reason.
+
+*The validation bullet is checked against the source*, not against one handler
+(`test/inventory.test.ts`). "No endpoint anywhere" is a claim about the whole
+codebase, and a test of one route cannot catch the next route.
 
 ### B8 — Returns, refunds, credit, gift cards · High
 
@@ -433,7 +458,7 @@ admin's read-only screens.
 | B4 Catalog reads | **done** | `20260801001300_catalog.sql`; storefront on the anon role |
 | B5 Cart & checkout | **done** | `20260801001400_checkout.sql`; guest carts on the service key |
 | B6 Payments & webhooks | **done** | `20260801001500_payments.sql`; courier/messaging deferred, provider not chosen |
-| B7 Inventory & fulfilment | not started | |
+| B7 Inventory & fulfilment | **done** | `20260801001600_inventory.sql`; sweepers moved into migrations |
 | B8 Returns & money | not started | |
 | B9 Invoicing | not started | |
 | B10 Customers & support | not started | |
