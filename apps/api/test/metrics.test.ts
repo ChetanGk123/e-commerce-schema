@@ -176,5 +176,7 @@ describe("the endpoint", () => {
     // apart from an endpoint that was never switched on.
     expect(r.none).toBe(404);
     expect(r.wrong).toBe(404);
-  });
+    // Same reason as the DOCS_PUBLIC test: a second Bun importing the
+    // whole app outlives the default five seconds on a cold runner.
+  }, 30_000);
 });

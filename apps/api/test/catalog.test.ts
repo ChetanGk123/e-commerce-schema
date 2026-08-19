@@ -155,6 +155,10 @@ describe("DOCS_PUBLIC=false", () => {
     return JSON.parse(text.trim().split("\n").pop()!) as Record<string, number>;
   };
 
+  // Thirty seconds, not bun's default five. The subprocess boots a second
+  // Bun and imports all 350 modules of the app; that is ~1s warm here and
+  // was over five on a cold CI runner, which is a timeout reported as a
+  // failing assertion about DOCS_PUBLIC.
   test("both documents are gone, and nothing else is", async () => {
     const status = await run();
     expect(status["/docs"]).toBe(404);
@@ -163,7 +167,7 @@ describe("DOCS_PUBLIC=false", () => {
     // is the one fact whoever asked for the route map was after. And the
     // service still serves -- hiding the map is not turning the API off.
     expect(status["/catalog/products?limit=1"]).not.toBe(404);
-  });
+  }, 30_000);
 });
 
 describe("B4 admin catalog is behind auth", () => {
