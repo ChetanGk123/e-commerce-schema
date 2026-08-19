@@ -99,7 +99,7 @@ interface InvoiceRow {
 // signed_qr is deliberately absent: it is a long opaque blob that
 // belongs on a printed invoice, not in every list response.
 const INVOICE_SELECT =
-  "id, invoice_number, order_id, kind, parent_invoice_id, customer_name, customer_gstin, seller_gstin, place_of_supply, taxable_value, cgst_total, sgst_total, igst_total, grand_total, pdf_url, irn, ack_no, ack_date, issued_at, orders(order_number), invoice_lines(id, description, hsn_code, quantity, unit_price, taxable_value, gst_rate, cgst_amount, sgst_amount, igst_amount, line_total)";
+  "id, invoice_number, order_id, kind, parent_invoice_id, customer_name, customer_gstin, seller_gstin, place_of_supply, taxable_value, cgst_total, sgst_total, igst_total, grand_total, pdf_url, irn, ack_no, ack_date, issued_at, orders!inner(order_number), invoice_lines(id, description, hsn_code, quantity, unit_price, taxable_value, gst_rate, cgst_amount, sgst_amount, igst_amount, line_total)";
 
 const n = (v: number) => Number(v);
 
@@ -328,7 +328,11 @@ export const invoicingRoute = new OpenAPIHono({ defaultHook: validationHook })
     const { data, error } = await c
       .get("caller")
       .db.from("invoices")
+      // orders!inner, or the filter below narrows the EMBEDDED order and
+      // leaves every invoice in the result. PostgREST only propagates a
+      // filter on an embedded column when the join is inner.
       .select(INVOICE_SELECT)
+      .eq("orders.customer_id", c.get("caller").userId)
       .order("issued_at", { ascending: false });
     throwOnDbError(error);
     return c.json(

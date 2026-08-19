@@ -415,6 +415,7 @@ export const engagementRoute = new OpenAPIHono({ defaultHook: validationHook })
     const { data, error } = await caller.db
       .from("wishlist_items")
       .select("variant_id, created_at")
+      .eq("customer_id", caller.userId)
       .order("created_at", { ascending: false });
     throwOnDbError(error);
 

@@ -344,6 +344,7 @@ export const supportRoute = new OpenAPIHono({ defaultHook: validationHook })
       .get("caller")
       .db.from("support_tickets")
       .select(CUSTOMER_TICKET_SELECT)
+      .eq("customer_id", c.get("caller").userId)
       .order("created_at", { ascending: false });
     throwOnDbError(error);
     return c.json(

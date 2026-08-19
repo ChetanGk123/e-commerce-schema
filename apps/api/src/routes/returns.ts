@@ -388,6 +388,7 @@ export const returnsRoute = new OpenAPIHono({ defaultHook: validationHook })
       .get("caller")
       .db.from("return_requests")
       .select(RETURN_SELECT)
+      .eq("customer_id", c.get("caller").userId)
       .order("created_at", { ascending: false });
     throwOnDbError(error);
     return c.json(

@@ -296,8 +296,16 @@ export const accountRoute = new OpenAPIHono({ defaultHook: validationHook })
         .select("id, email, phone, full_name, anonymized_at, created_at")
         .eq("id", caller.userId)
         .maybeSingle(),
-      db.from("addresses").select(ADDRESS_SELECT).order("is_default", { ascending: false }),
-      db.from("communication_preferences").select(PREF_SELECT).maybeSingle(),
+      db
+        .from("addresses")
+        .select(ADDRESS_SELECT)
+        .eq("customer_id", caller.userId)
+        .order("is_default", { ascending: false }),
+      db
+        .from("communication_preferences")
+        .select(PREF_SELECT)
+        .eq("customer_id", caller.userId)
+        .maybeSingle(),
     ]);
     for (const r of [profile, addresses, prefs]) throwOnDbError(r.error);
 
@@ -413,6 +421,10 @@ export const accountRoute = new OpenAPIHono({ defaultHook: validationHook })
       .db.from("addresses")
       .delete()
       .eq("id", id)
+      // Explicit, not left to RLS: staff_all lets a staff caller reach
+      // every address, so relying on the policy here would let one
+      // delete somebody else's.
+      .eq("customer_id", c.get("caller").userId)
       .select("id");
     throwOnDbError(error);
 
