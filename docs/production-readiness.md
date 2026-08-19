@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#10, #14, #15, #17 done; #1 and #11 part-done. Every smaller hole is closed. What is left is #12/#13 (infrastructure) and #16 (a decision). The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#10, #13, #14, #15, #17 done; #1 and #11 part-done. Every smaller hole is closed. What is left needs a decision from you, not more code: #16 (publish the docs or not), #11's metrics destination, #12 (move the limiter to Traefik), and #1's last piece (the Storage backend for product images). The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -309,9 +309,31 @@ that were never built, and the seam that nothing tests.**
       handled correctly: `idempotency.ts` is not a lock, and `checkout()` keeps
       its own inside the transaction.
 
-- [ ] **13. Backups, and one rehearsed restore.** Infrastructure rather than
-      code, already the top risk in `api-plan.md` and step C5 of `setup.md`.
-      Repeated here because nothing in this repo will fail if it is skipped.
+- [x] **13. Backups, and one rehearsed restore** — **done as far as this repo
+      can take it**: `scripts/backup.sh`, `scripts/restore.sh`,
+      `make restore-drill`. The entry's own complaint was that *nothing in this
+      repo will fail if it is skipped*. Now something does.
+      *The drill runs the same two scripts an operator runs against
+      `supabase-db-1`* — rehearsing a different procedure than the one you run
+      is rehearsing nothing. It backs up the seeded database, restores into an
+      empty container, fingerprints both (roles, every policy, RLS
+      enabled/forced per table, every function signature, every row count) and
+      diffs.
+      *The bug it caught was in the drill itself.* My first version ran
+      `01_invariants.sql` against the restored copy; that file loads fixtures,
+      so it cannot run against a database that has data. Fidelity to the source
+      is the right assertion for a backup — schema correctness is already
+      `make test`'s job.
+      *Verified it can fail*, which is the only reason to keep it: restoring
+      without `roles.sql` gives `role "authenticated" does not exist` and
+      `pg_restore` exits 1. **Only because `restore.sh` passes
+      `--exit-on-error`** — the default is to skip what fails and exit 0,
+      which is how you get every row and no access control and believe the
+      backup for a year.
+      **What is still not covered, and no script here will tell you:** product
+      images on a local Storage volume, and scheduling the thing off-host. The
+      drill is not wired into CI — that needs Docker + Postgres in the
+      workflow, which would also pull in `make test`, and is a separate call.
 
 ---
 
@@ -494,10 +516,10 @@ that were never built, and the seam that nothing tests.**
 2. ~~**#7, #8, #9**~~ — done. The API can be deployed and redeployed without
    dropping traffic.
 3. ~~**#17**~~ — done, and before the catalog writes as planned.
-4. ~~**#2–#4**~~ — done. **#1** remains part-done: products and variants can
-   be created and edited; options, option values, images, categories and
-   collections are still SQL. Images need the Storage decision
-   (`setup.md` C5) before they are worth building.
+4. ~~**#2–#4**~~ — done. **#1** remains part-done, and by one thing only:
+   products, variants, options, option values, categories and collections all
+   have admin routes now. **Product images do not**, and they need the Storage
+   decision (`setup.md` C5) before they are worth building.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
 
 Both finished items took longer than the entry predicted, for the same reason:

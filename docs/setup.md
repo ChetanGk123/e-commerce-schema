@@ -430,13 +430,44 @@ select jobname, schedule, active from cron.job order by jobname;
 **PITR does not exist here.** This database holds GST invoices you are required to retain
 and a `credit_ledger` that is money you owe customers. Nothing is backing it up by default.
 
-At minimum:
+Two scripts in this repo, so that the thing you rehearse is the thing you run:
 
-1. A scheduled `pg_dump` to off-host storage (Dokploy can schedule database backups to S3).
-2. **A restore, actually rehearsed into a scratch database.** An untested backup is not a
-   backup.
-3. If Storage keeps product images on a local volume rather than an S3-compatible backend,
-   that volume needs backing up too — it is not in the `pg_dump`.
+```bash
+scripts/backup.sh  supabase-db-1  /srv/backups        # cron this
+scripts/restore.sh <empty-container> /srv/backups/<stamp>
+```
+
+`backup.sh` writes **two** files, and the first is the one people forget:
+
+| file | why |
+|---|---|
+| `roles.sql` | `pg_dumpall --roles-only`. Roles are cluster-global, so they are **not** in a `pg_dump`. Restore without them and every `to authenticated` policy errors — and `pg_restore` keeps going, leaving you all the data and none of the access control |
+| `database.dump` | `pg_dump -Fc`. Compressed, and `pg_restore` can pull one table out of it at 3am |
+
+`restore.sh` loads the roles first and passes `--exit-on-error`. That flag is doing real
+work: without it a restore missing its roles **exits 0** after skipping the statements it
+could not run.
+
+### Rehearse it
+
+```bash
+make restore-drill
+```
+
+Backs up the seeded database with `backup.sh`, restores it into an empty container with
+`restore.sh`, and fingerprints both — roles, every policy, RLS enabled/forced per table,
+every function signature, every table's row count — then diffs. Any line that differs is
+something the backup did not bring across, named.
+
+It asserts fidelity to the source, not schema correctness; `make test` already does the
+latter, and `01_invariants.sql` loads fixtures so it cannot run against a database that
+has data. The seed is only ~44 rows across 16 tables, so this proves the *procedure*, not
+that a 40GB dump transfers — but the procedure is what fails, and it is what nobody checks.
+
+**Still not covered, and neither script will tell you:** product images, if Storage keeps
+them on a local volume rather than an S3-compatible backend. That volume is a separate
+backup. Role passwords are stripped (`--no-role-passwords`); set them from
+`template.toml` after a real restore or nothing can connect.
 
 For real point-in-time recovery rather than nightly snapshots, run WAL-G or pgBackRest
 against the Postgres container.
