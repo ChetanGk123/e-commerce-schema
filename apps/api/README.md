@@ -60,6 +60,12 @@ curl -s -H "Authorization: Bearer $TOKEN" 'localhost:3001/admin/products' | jq
 
 ## Getting a token
 
+> Working sign-ins for the local stack — four accounts covering owner,
+> warehouse, shopper and both-at-once — are in
+> [`docs/testing-accounts.md`](../../docs/testing-accounts.md), along with what
+> each one should return.
+
+
 The API verifies Supabase access tokens (HS256, the shared JWT secret). Ask
 GoTrue for one exactly as the front ends will:
 
