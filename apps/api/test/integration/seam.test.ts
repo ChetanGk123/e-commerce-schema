@@ -987,3 +987,152 @@ describe.skipIf(!up)("products can be configured", () => {
     });
   });
 });
+
+/**
+ * Categories and collections.
+ *
+ * The storefront has read both since B4, from whatever setup.md seeded
+ * at install; a store that started selling something new could not file
+ * it anywhere. The cycle guard (migration 0024) is here rather than in
+ * the route for the usual reason -- the categories in this store were
+ * created in psql, and a guard the API holds is a guard psql does not.
+ */
+describe.skipIf(!up)("a catalog can be organised", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  let staffAuth: Record<string, string>;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values ('${STAFF}', 'staff@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do update set role = 'owner', is_active = true;
+    `);
+    staffAuth = { Authorization: `Bearer ${await mintToken("authenticated", STAFF)}` };
+  });
+
+  const send = (method: string, path: string, body?: unknown) =>
+    app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json", ...staffAuth },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  const uniq = () => crypto.randomUUID().slice(0, 8);
+
+  test("a category tree can be built, and cannot eat itself", async () => {
+    const parent = await send("POST", "/admin/categories", {
+      name: "Laptops",
+      slug: `laptops-${uniq()}`,
+    });
+    expect(parent.status).toBe(201);
+    const parentId = ((await parent.json()) as { id: string }).id;
+
+    const child = await send("POST", "/admin/categories", {
+      name: "Ultrabooks",
+      slug: `ultrabooks-${uniq()}`,
+      parent_id: parentId,
+    });
+    expect(child.status).toBe(201);
+    const childId = ((await child.json()) as { id: string }).id;
+
+    // A -> B -> A. categories_no_self_parent never saw this one: it only
+    // stops a category being its own direct parent.
+    const cycle = await send("PATCH", `/admin/categories/${parentId}`, {
+      parent_id: childId,
+    });
+    expect(cycle.status).toBe(422);
+    expect((await cycle.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: "category_cycle" },
+    });
+
+    // The tree is untouched by the attempt.
+    expect(await sqlValue(`select coalesce(parent_id::text, '') from categories where id = '${parentId}'`)).toBe("");
+  });
+
+  test("a category can be moved back to the top level", async () => {
+    const top = await send("POST", "/admin/categories", { name: "Audio", slug: `audio-${uniq()}` });
+    const topId = ((await top.json()) as { id: string }).id;
+    const leaf = await send("POST", "/admin/categories", {
+      name: "Headphones",
+      slug: `headphones-${uniq()}`,
+      parent_id: topId,
+    });
+    const leafId = ((await leaf.json()) as { id: string }).id;
+
+    // null is a value here, not an absent field -- the usual "drop
+    // undefined" filter would silently ignore it.
+    const moved = await send("PATCH", `/admin/categories/${leafId}`, { parent_id: null });
+    expect(moved.status).toBe(200);
+    expect((await moved.json()) as { parentId: null }).toMatchObject({ parentId: null });
+  });
+
+  test("a collection's membership is set as a whole, in order", async () => {
+    const created = await send("POST", "/admin/collections", {
+      name: "Festive Picks",
+      slug: `festive-${uniq()}`,
+    });
+    expect(created.status).toBe(201);
+    const collectionId = ((await created.json()) as { id: string }).id;
+
+    const products = (
+      (await (await app.request("/catalog/products?limit=3")).json()) as {
+        items: { id: string }[];
+      }
+    ).items.map((p) => p.id);
+    expect(products.length).toBeGreaterThan(1);
+
+    const set = await send("PUT", `/admin/collections/${collectionId}/products`, {
+      product_ids: products,
+    });
+    expect(set.status).toBe(200);
+
+    // The array index is the position, so this is also how it is sorted.
+    expect(
+      await sqlValue(
+        `select string_agg(product_id::text, ',' order by position)
+           from collection_products where collection_id = '${collectionId}'`,
+      ),
+    ).toBe(products.join(","));
+
+    // Reversing the array reorders it, without a second endpoint.
+    await send("PUT", `/admin/collections/${collectionId}/products`, {
+      product_ids: [...products].reverse(),
+    });
+    expect(
+      await sqlValue(
+        `select string_agg(product_id::text, ',' order by position)
+           from collection_products where collection_id = '${collectionId}'`,
+      ),
+    ).toBe([...products].reverse().join(","));
+  });
+
+  test("hiding a collection takes it off the storefront without deleting it", async () => {
+    const created = await send("POST", "/admin/collections", {
+      name: "Staff Only",
+      slug: `staff-only-${uniq()}`,
+    });
+    const { id, slug } = (await created.json()) as { id: string; slug: string };
+
+    const visible = (await (await app.request("/catalog/collections")).json()) as {
+      items: { slug: string }[];
+    };
+    expect(visible.items.map((c) => c.slug)).toContain(slug);
+
+    expect((await send("PATCH", `/admin/collections/${id}`, { is_active: false })).status).toBe(200);
+
+    // public_read on collections is gated on is_active, so this is RLS
+    // hiding it rather than a filter in the handler.
+    const after = (await (await app.request("/catalog/collections")).json()) as {
+      items: { slug: string }[];
+    };
+    expect(after.items.map((c) => c.slug)).not.toContain(slug);
+    expect(await sqlValue(`select count(*) from collections where id = '${id}'`)).toBe("1");
+  });
+});

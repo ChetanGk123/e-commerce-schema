@@ -38,7 +38,7 @@ that were never built, and the seam that nothing tests.**
 | ~~8~~ | ~~No graceful shutdown~~ | **done** |
 | ~~9~~ | ~~No readiness probe~~ | **done** |
 | ~~17~~ | ~~No integration tests~~ | **done** |
-| 1 | Catalog writes — products, variants **and options** done; images, categories, collections still SQL | |
+| 1 | Catalog writes — everything except **product images**, which need the Storage decision first | |
 | ~~2–4~~ | ~~No discount, settings or shipping writes~~ | **done** |
 | ~~14~~ | ~~RLS ignores `staff_users.role`~~ | **done**, except `cost_price` |
 | ~~6~~ | ~~Nothing marks a shipment delivered~~ | **done** |
@@ -88,9 +88,23 @@ that were never built, and the seam that nothing tests.**
       resolve to the same `product_id` — 422 `cross_product_option`, a rule
       `errors.ts` already carried before anything could provoke it), and two
       variants cannot claim the same combination.
-      *Still open:* product images (needs the Storage decision, `setup.md` C5),
-      categories, collections, product relations, and delete/archive of a
-      product.
+      *Categories and collections too.* `/admin/categories` and
+      `/admin/collections`, plus `PUT /admin/collections/{id}/products`, which
+      sets membership as a whole with the array index as the position — so
+      re-sorting a collection needs no second endpoint.
+      *A cycle guard came with them* (`20260801002400_category_tree.sql`).
+      `categories_no_self_parent` only stopped A → A; nothing stopped
+      A → B → A, and every breadcrumb and "this category and its children"
+      query walks `parent_id`, so one loop is an infinite one. It is a trigger
+      rather than a route check because the categories in this store were
+      created in psql, and a guard the API holds is a guard psql does not.
+      *Deleting a category is deliberately not offered:*
+      `products.category_id` is `on delete set null`, so removing one would
+      silently unfile every product in it. Move the products first.
+      **Still open: product images only** — and they are blocked on a
+      decision, not on effort. `setup.md` C5 has Storage on a bind-mounted
+      local directory rather than S3; building an upload endpoint against an
+      unbacked volume would be building the wrong thing.
 
 - [x] **2. No discount or coupon management.** — **done**.
       `POST`/`GET` `/admin/discounts`, `PATCH /admin/discounts/{id}`, reusing

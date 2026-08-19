@@ -32,6 +32,7 @@ import { settingsRoute } from "./routes/settings";
 import { adminShippingRoute, shippingRoute } from "./routes/shipping";
 import { staffRoute } from "./routes/staff";
 import { supportRoute } from "./routes/support";
+import { taxonomyRoute } from "./routes/taxonomy";
 import { walletRoute } from "./routes/wallet";
 import { webhooksRoute } from "./routes/webhooks";
 
@@ -151,6 +152,7 @@ const routes = app
   .route("/", emailTemplatesRoute)
   .route("/", catalogRoute)
   .route("/", adminCatalogRoute)
+  .route("/", taxonomyRoute)
   .route("/", shippingRoute)
   .route("/", adminShippingRoute)
   .route("/", discountsRoute)
