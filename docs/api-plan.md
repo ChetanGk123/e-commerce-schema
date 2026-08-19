@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B10 done (bar courier/messaging webhooks), B11 next`
+**Status**: `B0-B11 done (bar courier/messaging webhooks), B12 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -474,12 +474,42 @@ section into marketing copy.
 
 ### B11 — Jobs · Low
 
-- [ ] **Confirm pg_cron is loaded** (`shared_preload_libraries`) and the extension created — self-hosted does not guarantee it
-- [ ] Schedule `pg_cron` per `docs/setup.md:238` — reservations every 5 min, then carts / idempotency / webhooks / notifications
-- [ ] **Fallback if pg_cron is unavailable**: run the same functions on an interval from the API. It is already a long-lived container, so this is a loop, not new infrastructure. Trade-off: the sweepers stop when the API is down, which is exactly what choosing pg_cron was meant to avoid
-- [ ] **Outbox drain in the API**: claim `message_log` rows where `status = 'queued'` (`idx_message_log_queued`), send via Resend/MSG91, update to sent/failed with `attempts`
-- [ ] Drain endpoint is secret-guarded, or an interval loop in-process
-- [ ] **Validate**: kill the mail provider → rows stay `queued`, nothing is lost; restore → they drain
+- [x] **Confirm pg_cron is loaded** and the extension created — done in B7. It was **not**: the extension had never been created, so nothing was scheduled
+- [x] Schedule `pg_cron` per `supabase/jobs/retention.sql`
+- [x] **Fallback if pg_cron is unavailable**: the API checks `sweeper_scheduled` once at boot and runs the sweepers in-process only when pg_cron does not. The stated trade-off holds — those sweepers stop when the API stops — so it stays off whenever cron has the job
+- [x] **Outbox drain in the API**: claim → send → settle, with `FOR UPDATE SKIP LOCKED`
+- [x] Drain endpoint secret-guarded, **and** an interval loop in-process
+- [x] **Validate**: kill the mail provider → rows stay `queued`, nothing is lost; restore → they drain
+
+**Found here.** The outbox had a producer and no consumer. `checkout()` has
+queued an order confirmation for every order ever placed, and nothing read them:
+eight messages sitting in `message_log`, oldest from the previous day.
+
+**Decided here.**
+
+*The claim is a state transition, not a lock held across the send.* One statement
+moves a batch to a new `sending` state under `FOR UPDATE SKIP LOCKED`, so two API
+instances split the queue instead of sending the same email twice. That needed a
+status the CHECK constraint did not allow, and with it the obligation to rescue
+rows a dead drainer leaves behind — `requeue_stalled_messages()`, scheduled with
+the other sweepers.
+
+*The stall clock starts at the claim, not at the queue.* The first version
+measured from `created_at`, which would requeue a message queued last week and
+claimed four seconds ago — while a drainer was still mid-send, so the second copy
+would go out. Caught by the invariant, fixed with a `claimed_at` column.
+
+*`attempts` increments at claim time, not at failure.* A message that kills the
+process on every attempt would otherwise look untried forever, and that is
+exactly the message worth noticing.
+
+*With no provider the drain claims nothing.* Claiming would burn an attempt
+against a send that was never going to happen, and five passes later the row
+would be `failed` for the crime of the store not having wired up mail yet.
+
+**Not verified**: a successful send through Resend, for want of credentials. The
+failure path is proven live (real 401 from Resend, rows requeued with the reason,
+attempts climbing, nothing lost); the success path is proven at the SQL level.
 
 ### B12 — Cross-cutting · Medium
 
@@ -562,6 +592,6 @@ admin's read-only screens.
 | B8 Returns & money | **done** | `20260801001700_returns_wallet.sql` |
 | B9 Invoicing | **done** | `20260801001800_invoicing.sql` |
 | B10 Customers & support | **done** | `20260801001900_support.sql`; closes a live erasure hole |
-| B11 Jobs | not started | pg_cron + outbox drain |
+| B11 Jobs | **done** | `20260801002000_jobs.sql`; outbox drain + pg_cron fallback |
 | B12 Cross-cutting | not started | |
 | B13 Realtime | scope-guarded | Supabase Realtime unless a screen demands more |

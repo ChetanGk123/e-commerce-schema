@@ -1374,6 +1374,118 @@ end $$;
 reset request.jwt.claim.sub;
 
 -- ============================================================
+-- The outbox drain (0020)
+-- ============================================================
+
+-- checkout() already queued confirmations above. Everything here is
+-- about what happens to them next.
+
+-- A claim moves rows out of reach of a second drainer. Without that,
+-- two API instances send the same order confirmation twice.
+do $$
+declare first_batch int; second_batch int; queued_before int;
+begin
+  select count(*) into queued_before from message_log where status = 'queued';
+  if queued_before < 2 then
+    raise exception 'FAIL  no queued messages to drain -- checkout did not fill the outbox';
+  end if;
+
+  select count(*) into first_batch from claim_outbox(1);
+  if first_batch <> 1 then
+    raise exception 'FAIL  claim_outbox(1) claimed % rows', first_batch;
+  end if;
+
+  -- The claimed row is now 'sending', so a second claim cannot see it.
+  select count(*) into second_batch
+  from message_log where status = 'sending';
+  if second_batch <> 1 then
+    raise exception 'FAIL  % rows are in sending after claiming one', second_batch;
+  end if;
+
+  raise notice 'PASS  claim_outbox -- a claimed message is out of reach of the next drainer';
+end $$;
+
+-- A provider having a bad minute is not a message that cannot be
+-- delivered, so a failure goes back to the queue -- until it has been
+-- tried enough times to say otherwise.
+do $$
+declare mid uuid; st text; i int;
+begin
+  select id into mid from message_log where status = 'sending' limit 1;
+
+  st := settle_message(mid, false, null, null, 'resend 503');
+  if st <> 'queued' then
+    raise exception 'FAIL  a single failure marked the message %', st;
+  end if;
+
+  -- Five more claim/fail rounds crosses the give-up line.
+  for i in 1..5 loop
+    perform claim_outbox(200);
+    st := settle_message(mid, false, null, null, 'resend 503');
+  end loop;
+
+  if st <> 'failed' then
+    raise exception 'FAIL  a message retried past the limit is still %', st;
+  end if;
+  raise notice 'PASS  settle_message -- failures requeue, and stop requeuing once they are hopeless';
+end $$;
+
+-- The success path, which the live test could not reach without real
+-- provider credentials.
+do $$
+declare mid uuid; st text; when_sent timestamptz;
+begin
+  perform claim_outbox(200);
+  select id into mid from message_log where status = 'sending' limit 1;
+
+  st := settle_message(mid, true, 'resend', 'msg_abc123');
+  if st <> 'sent' then
+    raise exception 'FAIL  a successful send landed on %', st;
+  end if;
+
+  select sent_at into when_sent from message_log where id = mid;
+  if when_sent is null then
+    raise exception 'FAIL  a sent message has no sent_at';
+  end if;
+  raise notice 'PASS  settle_message -- a delivered message is stamped sent, with the provider reference';
+end $$;
+
+-- A row left in 'sending' by a drainer that died is invisible to the
+-- claim query forever. This is the only thing that gets it back.
+do $$
+declare stuck int; rescued int;
+begin
+  perform claim_outbox(200);
+  select count(*) into stuck from message_log where status = 'sending';
+
+  -- Nothing is old enough yet, so a sane interval rescues nothing.
+  rescued := requeue_stalled_messages('10 minutes');
+  if rescued <> 0 then
+    raise exception 'FAIL  requeue took % messages that were still in flight', rescued;
+  end if;
+
+  -- Now pretend the drainer has been gone a while. now() is
+  -- transaction-stable, so inside one transaction "a while ago" has to
+  -- be expressed as a negative interval.
+  rescued := requeue_stalled_messages('-1 second');
+  if rescued <> stuck then
+    raise exception 'FAIL  % of % stalled messages were rescued', rescued, stuck;
+  end if;
+  raise notice 'PASS  requeue_stalled_messages -- rescues a dead drainer''s rows, and only those';
+end $$;
+
+-- The queue is a place messages wait, not a place they vanish from.
+do $$
+declare n int;
+begin
+  select count(*) into n from message_log where status = 'sending';
+  if n <> 0 then
+    raise exception 'FAIL  % messages ended stranded in sending', n;
+  end if;
+  raise notice 'PASS  outbox -- nothing is left stranded after a full drain cycle';
+end $$;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

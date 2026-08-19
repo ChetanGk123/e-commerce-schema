@@ -44,6 +44,12 @@ select cron.schedule('sweep-webhook-events', '40 3 * * 0',
 select cron.schedule('sweep-notifications', '50 3 * * 0',
                      $$select sweep_notifications()$$);
 
+-- Rescues outbox rows left in 'sending' by a drainer that died. The
+-- interval inside the function must stay longer than the slowest
+-- provider call, or this requeues a message still in flight.
+select cron.schedule('requeue-stalled-messages', '*/10 * * * *',
+                     $$select requeue_stalled_messages()$$);
+
 -- Check it took:
 --   select jobname, schedule, active from cron.job;
 --   select * from cron.job_run_details order by start_time desc limit 20;

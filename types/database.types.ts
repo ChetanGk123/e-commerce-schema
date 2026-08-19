@@ -600,6 +600,7 @@ export interface MessageLogEntry {
   attempts: number;  // has default
   created_at: string;  // has default
   sent_at: string | null;
+  claimed_at: string | null;
 }
 
 export interface SupportTicket {

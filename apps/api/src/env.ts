@@ -34,6 +34,23 @@ const schema = z.object({
   RAZORPAY_KEY_ID: z.string().min(1).optional(),
   RAZORPAY_KEY_SECRET: z.string().min(1).optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().min(1).optional(),
+
+  /**
+   * Outbox delivery. All optional: with no provider the drain claims
+   * nothing and every message stays queued, which is the correct
+   * behaviour for a store whose mail is not wired up yet -- and exactly
+   * what the drain does when the provider is merely down.
+   */
+  RESEND_API_KEY: z.string().min(1).optional(),
+  MAIL_FROM: z.string().email().optional(),
+  /** Guards POST /jobs/drain. Without it the endpoint refuses everyone. */
+  JOBS_SECRET: z.string().min(16).optional(),
+  /**
+   * Seconds between in-process drains. 0 disables the loop entirely --
+   * set that where pg_cron or an external scheduler owns the job, so two
+   * schedulers do not both drive it.
+   */
+  JOBS_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
 });
 
 const parsed = schema.safeParse(process.env);
