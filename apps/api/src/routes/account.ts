@@ -81,6 +81,25 @@ const ADDRESS_SELECT =
 const PREF_SELECT =
   "order_updates_email, order_updates_sms, order_updates_whatsapp, marketing_email, marketing_sms, marketing_whatsapp";
 
+interface CustomerRow {
+  id: string;
+  email: string | null;
+  phone: string | null;
+  full_name: string | null;
+  anonymized_at: string | null;
+  created_at: string;
+}
+
+/** Shared by the list and the detail, so the two cannot drift. */
+const shapeCustomer = (p: CustomerRow) => ({
+  id: p.id,
+  email: p.email,
+  phone: p.phone,
+  fullName: p.full_name,
+  anonymizedAt: p.anonymized_at,
+  createdAt: p.created_at,
+});
+
 const shapeAddress = (a: AddressRow) => ({
   id: a.id,
   label: a.label,
@@ -282,6 +301,89 @@ const listCustomers = createRoute({
     },
     400: jsonError("Invalid query"),
     ...authErrors,
+  },
+});
+
+/**
+ * Editing an address, and reading one customer.
+ *
+ * Addresses could be added and deleted and never corrected, so fixing a
+ * typo in a street name meant deleting the address and retyping it --
+ * which loses the default flag and any order that referenced it as the
+ * shipping address keeps its own snapshot anyway, so there was never a
+ * reason not to allow the edit.
+ *
+ * And /admin/customers listed customers with no way to open one, which
+ * makes it a search box that returns rows a support agent cannot act on.
+ */
+const editAddress = createRoute({
+  method: "patch",
+  path: "/account/addresses/{id}",
+  tags: ["account"],
+  summary: "Correct an address",
+  description:
+    "Partial. Orders keep their own snapshot of the address they shipped to, so editing one here never rewrites history -- it only changes what is offered at the next checkout.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: addressSchema
+            .partial()
+            .extend({ is_default: z.boolean().optional() })
+            .refine((b) => Object.keys(b).length > 0, {
+              message: "Send at least one field to change",
+            }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: Address } } },
+    400: jsonError("The body does not validate, or is empty"),
+    401: jsonError("Missing or invalid token"),
+    404: jsonError("No such address of yours"),
+    409: jsonError("You already have a default address"),
+  },
+});
+
+const readCustomer = createRoute({
+  method: "get",
+  path: "/admin/customers/{id}",
+  tags: ["admin", "account"],
+  summary: "One customer",
+  description:
+    "The profile, their addresses, their credit balance and their recent orders -- what a support agent needs open in front of them while the customer is on the phone.\n\nAn erased customer still resolves: `anonymize_customer()` scrubs the PII and keeps the row, because the orders and invoices hanging off it have to be kept. `anonymizedAt` is what says so.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "The customer",
+      content: {
+        "application/json": {
+          schema: z.object({
+            profile: Profile,
+            addresses: z.array(Address),
+            creditBalance: z.number(),
+            orders: z.array(
+              z.object({
+                id: z.string().uuid(),
+                orderNumber: z.string(),
+                status: z.string(),
+                grandTotal: z.number(),
+                placedAt: z.string(),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff -- or staff without customer access"),
+    404: jsonError("No such customer"),
   },
 });
 
@@ -514,26 +616,75 @@ export const accountRoute = new OpenAPIHono({ defaultHook: validationHook })
 
     return c.json(
       {
-        items: (
-          (data ?? []) as unknown as {
-            id: string;
-            email: string | null;
-            phone: string | null;
-            full_name: string | null;
-            anonymized_at: string | null;
-            created_at: string;
-          }[]
-        ).map((p) => ({
-          id: p.id,
-          email: p.email,
-          phone: p.phone,
-          fullName: p.full_name,
-          anonymizedAt: p.anonymized_at,
-          createdAt: p.created_at,
-        })),
+        items: ((data ?? []) as unknown as CustomerRow[]).map(shapeCustomer),
         total: count ?? null,
         limit,
         offset,
+      },
+      200,
+    );
+  })
+
+  .openapi(editAddress, async (c) => {
+    const { id } = c.req.valid("param");
+    const caller = c.get("caller");
+    const patch = Object.fromEntries(
+      Object.entries(c.req.valid("json")).filter(([, v]) => v !== undefined),
+    );
+
+    // own_addresses scopes this to the caller, and the id filter is what
+    // turns "not yours" into a 404 rather than a silent no-op.
+    const { data, error } = await caller.db
+      .from("addresses")
+      .update(patch)
+      .eq("id", id)
+      .eq("customer_id", caller.userId)
+      .select(ADDRESS_SELECT)
+      .maybeSingle();
+    throwOnDbError(error);
+    if (!data) throw new HTTPException(404, { message: "No such address" });
+
+    return c.json(shapeAddress(data as unknown as AddressRow), 200);
+  })
+
+  .openapi(readCustomer, async (c) => {
+    const { id } = c.req.valid("param");
+    const db = c.get("caller").db;
+
+    const [profile, addresses, credit, orders] = await Promise.all([
+      db
+        .from("customers")
+        .select("id, email, phone, full_name, anonymized_at, created_at")
+        .eq("id", id)
+        .maybeSingle(),
+      db.from("addresses").select(ADDRESS_SELECT).eq("customer_id", id),
+      // The view, not a sum here: it already decides what an expired
+      // credit row means, and checkout spends against the same rule.
+      db.from("customer_credit_balances").select("balance").eq("customer_id", id).maybeSingle(),
+      db
+        .from("orders")
+        .select("id, order_number, status, grand_total, placed_at")
+        .eq("customer_id", id)
+        .order("placed_at", { ascending: false })
+        .limit(20),
+    ]);
+    for (const r of [profile, addresses, credit, orders]) throwOnDbError(r.error);
+    if (!profile.data) throw new HTTPException(404, { message: "No such customer" });
+
+    return c.json(
+      {
+        profile: shapeCustomer(
+          profile.data as unknown as CustomerRow,
+        ),
+        addresses: ((addresses.data ?? []) as unknown as AddressRow[]).map(shapeAddress),
+        creditBalance: Number((credit.data as { balance: number } | null)?.balance ?? 0),
+        orders: ((orders.data ?? []) as unknown as Record<string, unknown>[]).map((o) => ({
+          id: o.id as string,
+          orderNumber: o.order_number as string,
+          status: o.status as string,
+          grandTotal: Number(o.grand_total),
+          placedAt: o.placed_at as string,
+        })),
       },
       200,
     );

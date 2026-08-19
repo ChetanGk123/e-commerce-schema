@@ -404,10 +404,27 @@ that were never built, and the seam that nothing tests.**
       in `0017` and never dropped, so a positional four-argument call was
       ambiguous between them. Nothing had noticed, because PostgREST calls it
       by name. Dropped.
-- [ ] No address edit: `POST` and `DELETE` only, no `PATCH`
-- [ ] No `GET /admin/customers/{id}` detail — the list, the credit and the
-      erasure exist, the customer does not
-- [ ] A customer cannot cancel their own order; `admin_cancel_order` is staff-only
+- [x] Address edit — **done**. `PATCH /account/addresses/{id}`. Deleting and
+      retyping lost the default flag; orders keep their own address snapshot,
+      so an edit never rewrites history. Another customer's address is a 404,
+      not a 403.
+- [x] `GET /admin/customers/{id}` — **done**. Profile, addresses, credit
+      balance and recent orders: what a support agent needs open while the
+      customer is on the phone. The list had been a search box returning rows
+      nobody could act on. The credit figure comes from
+      `customer_credit_balances`, the same view checkout spends against, so the
+      agent and the till agree. A warehouse account gets 404 — the role matrix
+      denies it the table, and RLS answers before the handler does.
+- [x] Customer self-cancel — **done**
+      (`20260801002600_customer_cancel.sql`, `POST /orders/{id}/cancel`).
+      **Pending only**, deliberately narrower than the staff version: that one
+      will cancel a paid order and return the sold units, which is the right
+      power for staff and the wrong one to hand a customer once money has
+      changed hands. Releases the stock hold rather than waiting for
+      `release_expired_reservations()` to sweep it. Ownership is in the `WHERE`
+      clause, not left to RLS — the function is `security definer`, so RLS does
+      not apply to it at all, and someone else's order answers 404 rather than
+      403.
 - [ ] No `Cache-Control` or `ETag` on the public catalog
 
 ---

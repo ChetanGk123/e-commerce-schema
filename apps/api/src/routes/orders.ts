@@ -557,6 +557,46 @@ const trackOrder = createRoute({
   },
 });
 
+/**
+ * Cancelling an order you placed and have not paid for.
+ *
+ * admin_cancel_order() has existed since B3 and requires staff, so the
+ * only route to a cancellation was a support ticket -- for something the
+ * customer should just be able to do, and while it sits unanswered the
+ * reservation holds stock nobody is going to buy.
+ *
+ * Pending only. The staff version will cancel a paid order and return
+ * the sold units; that is the right power for staff and the wrong one to
+ * hand a customer, because money has changed hands by then and unwinding
+ * it is a refund decision with a person attached.
+ */
+const cancelOwn = createRoute({
+  method: "post",
+  path: "/orders/{id}/cancel",
+  tags: ["orders"],
+  summary: "Cancel my order",
+  description:
+    "Only while the order is still `pending` -- nothing has been captured, so this releases the stock hold and closes the order. Once it is paid this answers 422 and the route is support, or a return after delivery.\n\nAn order that is not yours answers 404 rather than 403, so this cannot be used to find out which order ids exist.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ reason: z.string().max(500).optional() }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Cancelled", content: { "application/json": { schema: Order } } },
+    401: jsonError("Missing or invalid token"),
+    404: jsonError("No such order of yours"),
+    422: jsonError("Already paid, shipped or cancelled"),
+  },
+});
+
 export const ordersRoute = new OpenAPIHono({ defaultHook: validationHook })
   /**
    * FIRST in the chain, deliberately. `/orders/track` and `/orders/{id}`
@@ -707,4 +747,27 @@ export const ordersRoute = new OpenAPIHono({ defaultHook: validationHook })
       "orders.cancelled",
     );
     return c.json(shapeAdmin(order), 200);
+  })
+
+  .openapi(cancelOwn, async (c) => {
+    const { id } = c.req.valid("param");
+    const caller = c.get("caller");
+
+    // caller.db: cancel_own_order reads auth.uid() to decide whose order
+    // this is, so the service key would make it nobody's.
+    const { error } = await caller.db.rpc("cancel_own_order", {
+      p_order_id: id,
+      p_reason: c.req.valid("json").reason ?? null,
+    });
+    throwOnDbError(error);
+
+    const { data, error: readError } = await caller.db
+      .from("orders")
+      .select(OWN_SELECT)
+      .eq("id", id)
+      .single();
+    throwOnDbError(readError);
+
+    c.get("log")?.info({ orderId: id }, "orders.cancelled_by_customer");
+    return c.json(shape(data as unknown as OrderRow), 200);
   });

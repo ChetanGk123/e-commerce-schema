@@ -1476,3 +1476,190 @@ describe.skipIf(!up)("store credit pays for orders", () => {
     expect((await res.json()) as { creditApplied: number }).toMatchObject({ creditApplied: 0 });
   });
 });
+
+/**
+ * The three gaps left in the account and support surfaces.
+ *
+ * Cancelling is the one with teeth: it releases a stock hold, and
+ * whether the hold actually came back is a question only the ledger
+ * answers.
+ */
+describe.skipIf(!up)("customers can manage their own account", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  const ME = "aaaaaaaa-0000-4000-8000-00000000000d";
+  const OTHER = "aaaaaaaa-0000-4000-8000-00000000000e";
+  let variantId: string;
+
+  const auth = async (who: string) => ({
+    Authorization: `Bearer ${await mintToken("authenticated", who)}`,
+  });
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values
+        ('${STAFF}', 'staff@test.local'), ('${ME}', 'me@test.local'), ('${OTHER}', 'nosy@test.local')
+        on conflict (id) do nothing;
+      insert into customers (id, email, full_name) values
+        ('${ME}', 'me@test.local', 'Me'), ('${OTHER}', 'nosy@test.local', 'Nosy')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do update set role = 'owner', is_active = true;
+      update store_settings set cod_enabled = true where id = 1;
+    `);
+
+    const list = await app.request("/catalog/products?limit=1");
+    const { items } = (await list.json()) as { items: { slug: string }[] };
+    const detail = await app.request(`/catalog/products/${items[0]!.slug}`);
+    const product = (await detail.json()) as { variants: { id: string; stock: number }[] };
+    variantId = product.variants.find((v) => v.stock > 2)!.id;
+  });
+
+  const order = async () => {
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `cancel-${crypto.randomUUID()}`,
+        ...(await auth(ME)),
+      },
+      body: JSON.stringify({
+        items: [{ variant_id: variantId, quantity: 1 }],
+        email: "me@test.local",
+        contact_phone: "9876543210",
+        shipping_address: {
+          line1: "1 Test Street", city: "Bengaluru", state: "Karnataka",
+          postal_code: "560001", country: "IN",
+        },
+        payment_method: "cod",
+      }),
+    });
+    expect(res.status).toBe(201);
+    return (await res.json()) as { orderId: string };
+  };
+
+  const cancel = async (who: string, id: string) =>
+    app.request(`/orders/${id}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(await auth(who)) },
+      body: JSON.stringify({ reason: "changed my mind" }),
+    });
+
+  test("cancelling a pending order gives the stock back", async () => {
+    const { orderId } = await order();
+    const held = await sqlValue(
+      `select count(*) from inventory_movements
+        where order_id = '${orderId}' and reason = 'reservation'`,
+    );
+    expect(Number(held)).toBeGreaterThan(0);
+
+    const res = await cancel(ME, orderId);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { status: string }).toMatchObject({ status: "cancelled" });
+
+    // The hold is released, not merely forgotten: without this the units
+    // sit unsellable until release_expired_reservations() sweeps them.
+    expect(
+      await sqlValue(
+        `select count(*) from inventory_movements
+          where order_id = '${orderId}' and reason = 'release'`,
+      ),
+    ).toBe(held);
+  });
+
+  test("someone else's order is a 404, not a 403", async () => {
+    const { orderId } = await order();
+    // 403 would confirm the id exists, which is a way to enumerate them.
+    expect((await cancel(OTHER, orderId)).status).toBe(404);
+    expect(await sqlValue(`select status from orders where id = '${orderId}'`)).toBe("pending");
+  });
+
+  test("a paid order is not the customer's to cancel", async () => {
+    const { orderId } = await order();
+    const captured = await app.request(`/admin/orders/${orderId}/capture-cod`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `cap-${crypto.randomUUID()}`,
+        ...(await auth(STAFF)),
+      },
+    });
+    expect(captured.status).toBe(200);
+
+    // Money has changed hands; unwinding it is a refund decision with a
+    // person attached, which is what the staff route is for.
+    const res = await cancel(ME, orderId);
+    expect(res.status).toBe(422);
+    expect((await res.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: "order_not_cancellable" },
+    });
+  });
+
+  test("an address can be corrected without being retyped", async () => {
+    const created = await app.request("/account/addresses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(await auth(ME)) },
+      body: JSON.stringify({
+        line1: "1 Typo Street", city: "Bengaluru", state: "Karnataka",
+        postal_code: "560001", country: "IN", is_default: true,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const addressId = ((await created.json()) as { id: string }).id;
+
+    const fixed = await app.request(`/account/addresses/${addressId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...(await auth(ME)) },
+      body: JSON.stringify({ line1: "1 Correct Street" }),
+    });
+    expect(fixed.status).toBe(200);
+    // The default flag survives, which retyping the address would lose.
+    expect((await fixed.json()) as { line1: string; isDefault: boolean }).toMatchObject({
+      line1: "1 Correct Street",
+      isDefault: true,
+    });
+
+    // Another customer cannot reach it, and gets 404 rather than 403.
+    const theirs = await app.request(`/account/addresses/${addressId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...(await auth(OTHER)) },
+      body: JSON.stringify({ line1: "Mine now" }),
+    });
+    expect(theirs.status).toBe(404);
+  });
+
+  test("staff can open a customer, with everything the phone call needs", async () => {
+    const res = await app.request(`/admin/customers/${ME}`, { headers: await auth(STAFF) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      profile: { email: string };
+      addresses: unknown[];
+      creditBalance: number;
+      orders: { orderNumber: string }[];
+    };
+    expect(body.profile.email).toBe("me@test.local");
+    expect(body.addresses.length).toBeGreaterThan(0);
+    expect(body.orders.length).toBeGreaterThan(0);
+    expect(typeof body.creditBalance).toBe("number");
+  });
+
+  test("a packer cannot open one", async () => {
+    // The role matrix denies warehouse the customers table, and this
+    // route reads it as the caller, so RLS answers before the handler.
+    const packer = "bbbbbbbb-0000-4000-8000-000000000009";
+    await sql(`
+      insert into auth.users (id, email) values ('${packer}', 'packer@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${packer}', 'packer@test.local', 'warehouse', 'Packer', true)
+        on conflict (id) do update set role = 'warehouse', is_active = true;
+    `);
+    const res = await app.request(`/admin/customers/${ME}`, { headers: await auth(packer) });
+    expect(res.status).toBe(404);
+  });
+});
