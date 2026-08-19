@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #5, #7, #8, #9, #10 done — the API is deployable. The rest open
+**Status**: #5, #7, #8, #9, #10, #17 done — the API is deployable and the seam is tested. The rest open
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -37,7 +37,7 @@ that were never built, and the seam that nothing tests.**
 | ~~7~~ | ~~No Dockerfile, no CI~~ | **done** |
 | ~~8~~ | ~~No graceful shutdown~~ | **done** |
 | ~~9~~ | ~~No readiness probe~~ | **done** |
-| 17 | No integration tests | Both suites stay green while the system is broken |
+| ~~17~~ | ~~No integration tests~~ | **done** |
 | 1–4 | No catalog, discount, settings or shipping writes | The store can only be run by hand in SQL |
 | 14 | RLS ignores `staff_users.role` | A warehouse JWT reads `cost_price` and all PII |
 | 6 | Nothing marks a shipment delivered | Orders stay "shipped" permanently |
@@ -218,19 +218,33 @@ that were never built, and the seam that nothing tests.**
 
 ## Verification — where the real risk is
 
-- [ ] **17. There are no integration tests.** The 228 tests in `apps/api/test`
-      never touch Postgres — genuinely, as of #7: one catalog test did reach a
-      real database, so it passed or failed on whether a stack happened to be
-      running. It asserts from the OpenAPI document now, and the suite runs in
-      821ms with no `.env` at all, which is what makes CI possible.
-      `supabase/tests/01_invariants.sql` `supabase/tests/01_invariants.sql` runs against a
-      throwaway container with no API in front of it. Nothing exercises the seam
-      between them — that `checkout()`'s parameter names match what the route
-      sends, that RLS permits the route's select list, that renaming an RPC
-      breaks something. **Both suites stay green while the system is broken**,
-      and this architecture put all of its logic in exactly that seam.
-      A compose'd Postgres plus a dozen HTTP tests through `app.request()`
-      closes it; the existing `make verify` container is most of the work.
+- [x] **17. There were no integration tests.** — **done**. `make test-api`.
+      *The gap:* `bun test` never reached Postgres; the SQL invariants never
+      reached the API. Nothing exercised what is only true if the two agree,
+      and this architecture put all of its logic exactly there.
+      *The harness:* PostgREST in front of the same throwaway Postgres
+      `make verify` already builds, schema and seed loaded. **No GoTrue** —
+      `apps/api` verifies JWTs itself against the shared secret, so the
+      harness mints its own in the shape Supabase issues (`role` is the
+      load-bearing claim; PostgREST SETs that database role, which is what
+      makes RLS apply to the right person). Kong is twelve lines of path
+      rewrite rather than a fourth container.
+      *Seven tests, chosen for what only a real database can refuse:*
+      checkout actually places an order (eleven RPC parameters — rename one
+      and every other suite stays green while no order can be placed),
+      oversell comes back as a mapped code rather than a 500, one customer
+      cannot read another's orders, a draft product is invisible, a
+      customer's token is refused by the admin surface.
+      *Skipped, not failed, when the stack is down* — a suite that fails on a
+      laptop without Docker gets deleted, and then none of this is tested.
+      `bun test` reports 228 pass, 8 skip.
+      *It found a real fidelity bug on its first run.* The shim's `auth.uid()`
+      read only `request.jwt.claim.sub`; PostgREST v9+ sets
+      `request.jwt.claims` as one JSON object, so `auth.uid()` was null, RLS
+      believed nobody was signed in, and every staff request answered 403. It
+      now mirrors Supabase's own definition, which reads both. **The SQL
+      invariants could never have caught this** — they set the GUC by hand,
+      so they were testing a shape no real client produces.
 
 ---
 
@@ -253,8 +267,9 @@ that were never built, and the seam that nothing tests.**
 1. ~~**#5 and #10**~~ — done. Both lost money, both were small.
 2. ~~**#7, #8, #9**~~ — done. The API can be deployed and redeployed without
    dropping traffic.
-3. **#17** — before any of the catalog writes.
-4. **#1–#4** — a lot of new SQL-touching code, which is precisely why #17 comes first.
+3. ~~**#17**~~ — done, and before the catalog writes as planned.
+4. **#1–#4** — a lot of new SQL-touching code, and now there is something
+   that will notice when it disagrees with the schema.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
 
 Both finished items took longer than the entry predicted, for the same reason:

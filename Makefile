@@ -19,20 +19,30 @@
 CONTAINER  := ecomm-verify
 PGIMAGE    := postgres:16-alpine
 PGPORT     := 55432
+# The API integration stack: PostgREST in front of the same container, so
+# apps/api can be exercised over HTTP exactly as it runs in production.
+NETWORK    := ecomm-test
+PGRST      := ecomm-postgrest
+PGRSTIMAGE := postgrest/postgrest:v12.2.3
+PGRSTPORT  := 55433
+# Shared by PostgREST and apps/api, as GOTRUE_JWT_SECRET/PGRST_JWT_SECRET
+# are on a real deployment. Throwaway: this stack is destroyed each run.
+JWTSECRET  := integration-only-secret-at-least-32-characters-long
 PSQL       := docker exec -i $(CONTAINER) psql -U postgres -v ON_ERROR_STOP=1 -q
 MIGRATIONS := $(sort $(wildcard supabase/migrations/*.sql))
 
-.PHONY: help verify test seed psql down types lint bundle verify-bundle
+.PHONY: help verify test seed psql down types lint bundle verify-bundle stack test-api
 
 help:
 	@grep -E '^#   make' Makefile | sed 's/^#   /  /'
 
 down:
-	@docker rm -f $(CONTAINER) >/dev/null 2>&1 || true
+	@docker rm -f $(CONTAINER) $(PGRST) >/dev/null 2>&1 || true
 
 verify: down
 	@echo "==> starting $(PGIMAGE)"
-	@docker run -d --name $(CONTAINER) -e POSTGRES_PASSWORD=pw \
+	@docker network create $(NETWORK) >/dev/null 2>&1 || true
+	@docker run -d --name $(CONTAINER) --network $(NETWORK) -e POSTGRES_PASSWORD=pw \
 		-p $(PGPORT):5432 $(PGIMAGE) >/dev/null
 	@for i in $$(seq 1 60); do \
 		docker exec $(CONTAINER) pg_isready -U postgres >/dev/null 2>&1 && break; \
@@ -61,6 +71,44 @@ seed: verify
 	@echo "==> seeding demo data"
 	@$(PSQL) < supabase/seed.sql
 	@echo "==> seeded"
+
+# ------------------------------------------------------------
+# The API integration stack.
+#
+# `bun test` in apps/api never reaches a database, and the SQL
+# invariants never reach the API. Everything between the two -- that
+# checkout()'s parameter names match what the route sends, that RLS
+# permits the route's select list, that a renamed RPC breaks something
+# -- was untested, and that seam is where this architecture put all of
+# its logic.
+#
+# PostgREST is the whole difference. GoTrue is not needed: apps/api
+# verifies JWTs itself against the shared secret, so the harness mints
+# its own. Only /auth/* proxies to GoTrue, and those routes are not
+# what this is for.
+# ------------------------------------------------------------
+stack: seed
+	@echo "==> starting $(PGRSTIMAGE)"
+	@docker rm -f $(PGRST) >/dev/null 2>&1 || true
+	@docker run -d --name $(PGRST) --network $(NETWORK) \
+		-e PGRST_DB_URI="postgres://postgres:pw@$(CONTAINER):5432/postgres" \
+		-e PGRST_DB_SCHEMAS=public \
+		-e PGRST_DB_ANON_ROLE=anon \
+		-e PGRST_JWT_SECRET="$(JWTSECRET)" \
+		-e PGRST_DB_POOL=4 \
+		-p $(PGRSTPORT):3000 $(PGRSTIMAGE) >/dev/null
+	@for i in $$(seq 1 60); do \
+		curl -sf http://localhost:$(PGRSTPORT)/ >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@echo "==> PostgREST on http://localhost:$(PGRSTPORT) (schema + seed loaded)"
+
+test-api: stack
+	@echo "==> running apps/api integration tests against the stack"
+	@cd apps/api && \
+		INTEGRATION_PGRST_URL=http://localhost:$(PGRSTPORT) \
+		INTEGRATION_JWT_SECRET="$(JWTSECRET)" \
+		bun test test/integration/
 
 psql:
 	@docker exec -it $(CONTAINER) psql -U postgres
