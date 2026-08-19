@@ -8,6 +8,13 @@ export const logger = pino({
   base: { service: "api" },
   // Human-readable in development, JSON everywhere else so a log shipper can
   // parse it. pino-pretty is a devDependency and is never required in prod.
+  //
+  // This branch is also why the container sets NODE_ENV=production and not
+  // merely as a convention: the transport runs pino-pretty in a worker
+  // thread, and a worker cannot resolve its target out of the single file
+  // `bun build` emits. The bundled process dies at boot with
+  // `DataCloneError: The object can not be cloned`, which names nothing
+  // that would lead you here.
   ...(env.NODE_ENV === "development"
     ? {
         transport: {

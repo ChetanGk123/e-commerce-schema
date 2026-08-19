@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    env:
+      # env.ts validates at import time and refuses to boot without these,
+      # and importing the app is the first thing every test does. The
+      # values are fake on purpose: the suite reaches no network, so a
+      # real key here would buy nothing and leak something.
+      SUPABASE_URL: http://localhost:54321
+      SUPABASE_ANON_KEY: ci-not-a-real-key
+      SUPABASE_SERVICE_ROLE_KEY: ci-not-a-real-key
+      SUPABASE_JWT_SECRET: ci-not-a-real-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Matches packageManager in package.json and the Dockerfile.
+          bun-version: 1.3.11
+
+      - run: bun install --frozen-lockfile
+
+      # Covers every workspace, which is the point: packages/client
+      # type-checks the API's source without @types/bun, so a Bun-only
+      # type reaching the published surface fails here rather than in
+      # whichever front end imports AppType next.
+      - run: bun run typecheck
+
+      - run: bun test

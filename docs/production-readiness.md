@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #5, #8, #9, #10 done; the rest open
+**Status**: #5, #7, #8, #9, #10 done — the API is deployable. The rest open
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -34,7 +34,7 @@ that were never built, and the seam that nothing tests.**
 |---|---|---|
 | ~~5~~ | ~~Failed webhooks never retried or surfaced~~ | **done** |
 | ~~10~~ | ~~No timeout on Supabase calls~~ | **done** |
-| 7 | No Dockerfile, no CI | Cannot deploy at all |
+| ~~7~~ | ~~No Dockerfile, no CI~~ | **done** |
 | ~~8~~ | ~~No graceful shutdown~~ | **done** |
 | ~~9~~ | ~~No readiness probe~~ | **done** |
 | 17 | No integration tests | Both suites stay green while the system is broken |
@@ -97,9 +97,30 @@ that were never built, and the seam that nothing tests.**
 
 ## Operations — nothing is deployable yet
 
-- [ ] **7. No deployment artifacts.** No Dockerfile, no compose service, no
-      Nixpacks config, no CI workflow anywhere in the repo. The plan's own
-      `turbo prune`-on-Bun risk is still unverified.
+- [x] **7. No deployment artifacts.** — **done**. Multi-stage `Dockerfile`,
+      `.dockerignore`, and `.github/workflows/ci.yml` (typecheck + `bun test`).
+      Built and run for real, not just written.
+      *`turbo prune` on Bun is moot, not unverified.* The risk `api-plan.md`
+      flagged was about shipping a pruned install; `bun build` emits one
+      self-contained 2 MB file, so the runtime stage copies that and no
+      `node_modules` ships at all. Image 280 MB, runs as the unprivileged
+      `bun` user, verified to contain no `.env`.
+      *Three things only a real build could have found:*
+      **`NODE_ENV=production` is load-bearing.** In development `logger.ts`
+      sends pino through a `pino-pretty` worker, which cannot resolve its
+      target out of a bundle — the container dies at boot with
+      `DataCloneError: The object can not be cloned`, naming nothing useful.
+      **`CMD ["bun", "run", ...]` breaks shutdown.** The wrapper sits at PID 1
+      and SIGTERM never reaches the server. `bun server.js`, exec form.
+      **The platform's default stop timeout is not enough.** `docker stop` on
+      the default SIGKILLed the drain at 1.1s (exit 137); with an explicit
+      `-t 10` it finished in 5.2s (exit 0). Set `stop_grace_period: 45s`
+      wherever this deploys — the Dockerfile says so at the `CMD`.
+      *And one CI caught before CI existed:* `fetch.preconnect` in
+      `supabase.ts` was a Bun-only type, and `packages/client` type-checks the
+      API's source without `@types/bun` — the same trap B12 hit with
+      `Bun.CryptoHasher`. `bun run typecheck` covers every workspace, which is
+      why it is the root script and not `--filter @ecom/api`.
 
 - [x] **8. Nothing handled a shutdown signal.** — **done**, together with #9;
       the two only work as a pair.
@@ -197,8 +218,12 @@ that were never built, and the seam that nothing tests.**
 
 ## Verification — where the real risk is
 
-- [ ] **17. There are no integration tests.** The 223 tests in `apps/api/test`
-      never touch Postgres; `supabase/tests/01_invariants.sql` runs against a
+- [ ] **17. There are no integration tests.** The 228 tests in `apps/api/test`
+      never touch Postgres — genuinely, as of #7: one catalog test did reach a
+      real database, so it passed or failed on whether a stack happened to be
+      running. It asserts from the OpenAPI document now, and the suite runs in
+      821ms with no `.env` at all, which is what makes CI possible.
+      `supabase/tests/01_invariants.sql` `supabase/tests/01_invariants.sql` runs against a
       throwaway container with no API in front of it. Nothing exercises the seam
       between them — that `checkout()`'s parameter names match what the route
       sends, that RLS permits the route's select list, that renaming an RPC
@@ -226,11 +251,8 @@ that were never built, and the seam that nothing tests.**
 ## Order to do it in
 
 1. ~~**#5 and #10**~~ — done. Both lost money, both were small.
-2. ~~**#8, #9**~~ — done, and they had to be done together: a shutdown that
-   does not fail readiness first is just a faster way to drop traffic.
-   **#7** is what is left before anything can deploy, and it is the one with an
-   unknown in it (`turbo prune` on Bun). Its `HEALTHCHECK` now has a real
-   endpoint to point at.
+2. ~~**#7, #8, #9**~~ — done. The API can be deployed and redeployed without
+   dropping traffic.
 3. **#17** — before any of the catalog writes.
 4. **#1–#4** — a lot of new SQL-touching code, which is precisely why #17 comes first.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.

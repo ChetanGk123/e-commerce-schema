@@ -142,10 +142,22 @@ describe("B4 admin catalog is behind auth", () => {
   });
 
   test("the storefront needs no token at all", async () => {
-    // It must not 401: the catalog is public, and a storefront that requires
-    // sign-in to browse is not a storefront.
-    const res = await app.request("/catalog/products?limit=1");
-    expect(res.status).not.toBe(401);
-    expect(res.status).not.toBe(403);
+    // The catalog is public, and a storefront that requires sign-in to
+    // browse is not a storefront.
+    //
+    // Asserted from the document rather than by calling the route. The
+    // call reached a real database -- the only test in this suite that
+    // did -- so it passed or failed on whether a stack happened to be
+    // running, and against an unreachable one it outlived bun's default
+    // timeout rather than failing on the thing it was checking.
+    const paths = (await doc()).paths as Record<
+      string,
+      Record<string, { security?: unknown[]; responses: Record<string, unknown> }>
+    >;
+    const get = paths["/catalog/products"]?.get;
+    expect(get).toBeDefined();
+    expect(get?.security).toBeUndefined();
+    expect(get?.responses["401"]).toBeUndefined();
+    expect(get?.responses["403"]).toBeUndefined();
   });
 });

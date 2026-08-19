@@ -41,25 +41,24 @@ import { env } from "./env";
  * 504 rather than the generic 500, so a caller is told to retry rather
  * than told nothing.
  */
-const withDeadline: typeof fetch = Object.assign(
-  (
-    input: Parameters<typeof fetch>[0],
-    init?: Parameters<typeof fetch>[1],
-  ): Promise<Response> => {
-    const deadline = AbortSignal.timeout(env.SUPABASE_TIMEOUT_MS);
-    return fetch(input, {
-      ...init,
-      // supabase-js's own .abortSignal() has to keep working. Whichever
-      // fires first wins; replacing the caller's signal would silently
-      // disable every cancellation the client asked for.
-      signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
-    });
-  },
-  // supabase-js types its fetch option as the runtime's own `fetch`, and
-  // Bun's carries a preconnect helper. Nothing here calls it; the wrapper
-  // has to have it to be that type at all.
-  { preconnect: fetch.preconnect },
-);
+const withDeadline = ((
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> => {
+  const deadline = AbortSignal.timeout(env.SUPABASE_TIMEOUT_MS);
+  return fetch(input, {
+    ...init,
+    // supabase-js's own .abortSignal() has to keep working. Whichever
+    // fires first wins; replacing the caller's signal would silently
+    // disable every cancellation the client asked for.
+    signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+  });
+  // The cast, and why it is not an Object.assign carrying Bun's
+  // `preconnect`: packages/client type-checks this file (it imports
+  // AppType) without @types/bun, so naming a Bun-only property here fails
+  // its build -- the same way Bun.CryptoHasher did in B12. A wrapper that
+  // forwards to fetch is a fetch; the helper it lacks is one nothing calls.
+}) as unknown as typeof fetch;
 
 let anon: SupabaseClient | undefined;
 
