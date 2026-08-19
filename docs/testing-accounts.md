@@ -21,19 +21,17 @@ Emails:
 
 ```
 staff@test.local
+```
+```
 warehouse@test.local
+```
+```
 shopper2@test.local
+```
+```
 staff2@test.local
 ```
 
-Or as pairs, to paste straight into a sign-in form:
-
-```
-staff@test.local        DevPassw0rd!
-warehouse@test.local    DevPassw0rd!
-shopper2@test.local     DevPassw0rd!
-staff2@test.local       DevPassw0rd!
-```
 
 | Email | Role | What it is for |
 |---|---|---|

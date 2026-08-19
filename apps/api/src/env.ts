@@ -51,6 +51,37 @@ const schema = z.object({
    * schedulers do not both drive it.
    */
   JOBS_INTERVAL_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
+
+  /**
+   * Browser origins allowed to call this API, comma separated. Empty means
+   * NO browser may call it -- which is the right default for a service that
+   * holds the service key: a permissive CORS policy on a credentialed API
+   * is how a shopper's session gets driven from a page they did not open.
+   *
+   *   CORS_ORIGINS=https://admin.example.com,https://shop.example.com
+   */
+  CORS_ORIGINS: z
+    .string()
+    .default("")
+    .transform((v) => v.split(",").map((o) => o.trim()).filter(Boolean)),
+
+  /** Largest request body accepted, in kilobytes. */
+  MAX_BODY_KB: z.coerce.number().int().min(1).max(10_240).default(256),
+
+  /**
+   * Requests per minute per client IP on the anonymous write surfaces.
+   * 0 disables the limiter -- for a deployment sitting behind one that
+   * already does this properly, since two limiters disagreeing is worse
+   * than one.
+   */
+  RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(0).max(100_000).default(60),
+
+  /**
+   * Header carrying the real client IP, set by whatever sits in front.
+   * Read ONLY when named: trusting X-Forwarded-For unconditionally lets
+   * any caller pick their own rate-limit bucket by forging it.
+   */
+  TRUSTED_PROXY_HEADER: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

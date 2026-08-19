@@ -2,6 +2,7 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
 import { requireAuth, requireStaff } from "../auth";
+import { idempotent } from "../idempotency";
 import { throwOnDbError } from "../errors";
 import { paymentsConfigured, refundPayment, toPaise } from "../razorpay";
 import { jsonError, pageQuery, validationHook } from "../schemas";
@@ -294,8 +295,15 @@ const refund = createRoute({
   description:
     "Records the refund first, then asks the gateway. If the gateway cannot be reached the refund stays `initiated` -- visible and retryable through the settle endpoint -- rather than disappearing.\n\nRefunding more than was captured, counting every earlier refund, is refused. Only a full refund moves the order to `refunded`; a partial one leaves it alone, because `refunded` tells the warehouse to stop shipping goods the customer is still owed.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff] as const,
+  middleware: [requireAuth, requireStaff, idempotent("refund", true)] as const,
   request: {
+    headers: z.object({
+      "idempotency-key": z
+        .string()
+        .min(8)
+        .max(255)
+        .openapi({ description: "Required. One per refund attempt; replaying it returns the first response instead of sending the money twice." }),
+    }),
     params: z.object({ id: z.string().uuid() }),
     body: {
       content: {

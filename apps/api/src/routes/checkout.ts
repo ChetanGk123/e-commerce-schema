@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { checkoutSchema } from "@ecom/schema/validation";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
@@ -78,9 +80,7 @@ export function requestHash(body: unknown): string {
     }
     return v;
   };
-  return new Bun.CryptoHasher("sha256")
-    .update(JSON.stringify(canonical(body)))
-    .digest("hex");
+  return createHash("sha256").update(JSON.stringify(canonical(body))).digest("hex");
 }
 
 const checkout = createRoute({

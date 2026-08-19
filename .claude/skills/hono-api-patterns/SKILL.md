@@ -148,6 +148,25 @@ Invoices are immutable, undeletable, and gap-free. `protect_invoice()` is a
 - **The e-invoice stamp is writable once**, all four fields together. `pdf_url` stays
   mutable -- regenerating a PDF from unchanged data is not an amendment.
 
+## Cross-cutting middleware
+
+Order in `app.ts` matters and is deliberate: request id and logging, then CORS,
+then the body cap, then rate limits, then per-route auth.
+
+- **CORS is closed unless `CORS_ORIGINS` names an origin.** Never widen it to `*` on a
+  service that holds the service key.
+- **Rate-limit the anonymous write surfaces**, with a `cost` reflecting what the request
+  actually does. Reads are not limited -- browsing a catalog is not an attack.
+- **Never read `X-Forwarded-For` unless `TRUSTED_PROXY_HEADER` names it.** Otherwise a
+  caller forges it and gets a fresh bucket per request.
+- **`idempotent(scope)` for money-moving POSTs**, but it is not a lock -- see
+  `idempotency.ts`. Anything needing a real guarantee under concurrency claims its key
+  inside the transaction, as `checkout()` does.
+- **A test that hits a rate-limited path needs `beforeEach(resetRateLimits)`.**
+  `app.request()` has no socket address, so every in-process request shares one bucket.
+- **No Bun globals in `src/`.** `@ecom/client` typechecks against this source, and a Bun
+  global forces `@types/bun` onto every consumer. Use `node:crypto`.
+
 ## Money leaving
 
 Refunds, credit and gift cards follow the same shape as webhooks, for the same

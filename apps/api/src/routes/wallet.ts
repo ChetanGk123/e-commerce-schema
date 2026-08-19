@@ -1,6 +1,7 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 
 import { requireAuth, requireStaff } from "../auth";
+import { idempotent } from "../idempotency";
 import { throwOnDbError } from "../errors";
 import { jsonError, pageQuery, validationHook } from "../schemas";
 
@@ -148,7 +149,7 @@ const grant = createRoute({
   description:
     "`return_credit` and `gift_card_redemption` are not grantable here -- those are written by the flows that earn them, and granting one by hand would invent a return or a card that does not exist. The note is mandatory.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff] as const,
+  middleware: [requireAuth, requireStaff, idempotent("credit_grant")] as const,
   request: {
     params: z.object({ id: z.string().uuid() }),
     body: {
@@ -205,8 +206,15 @@ const issue = createRoute({
   description:
     "**The code is returned once and never again.** Only its sha256 is stored, so there is no endpoint that can tell you what it was -- if this response is lost, the card must be reissued and the old one disabled.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff] as const,
+  middleware: [requireAuth, requireStaff, idempotent("gift_card_issue", true)] as const,
   request: {
+    headers: z.object({
+      "idempotency-key": z
+        .string()
+        .min(8)
+        .max(255)
+        .openapi({ description: "Required. A gift card is money; a double-submit must not mint two." }),
+    }),
     body: {
       content: {
         "application/json": {

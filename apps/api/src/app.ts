@@ -1,8 +1,12 @@
 import { swaggerUI } from "@hono/swagger-ui";
+import { bodyLimit } from "hono/body-limit";
+import { cors } from "hono/cors";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
 import { type DbError, mapDatabaseError } from "./errors";
+import { env } from "./env";
+import { rateLimit } from "./limits";
 import { requestLogger } from "./logger";
 import { validationHook } from "./schemas";
 import { adminCatalogRoute } from "./routes/admin-catalog";
@@ -32,6 +36,68 @@ import { webhooksRoute } from "./routes/webhooks";
 export const app = new OpenAPIHono({ defaultHook: validationHook });
 
 app.use("*", requestLogger);
+
+/**
+ * CORS, closed by default.
+ *
+ * With CORS_ORIGINS unset no browser origin is allowed, which is the
+ * right default for a service holding the service key: a permissive
+ * policy on a credentialed API is how a shopper's session gets driven
+ * from a page they never opened. Server-to-server callers -- webhooks,
+ * cron, curl -- send no Origin and are unaffected either way.
+ */
+app.use(
+  "*",
+  cors({
+    origin: (origin) => (env.CORS_ORIGINS.includes(origin) ? origin : null),
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "X-Cart-Session",
+      "X-Cart-Id",
+      "X-Request-Id",
+    ],
+    allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    // The cart session and the rate-limit budget both need to survive a
+    // browser round trip, so the client has to be able to read them.
+    exposeHeaders: [
+      "X-Cart-Session",
+      "X-Request-Id",
+      "RateLimit-Limit",
+      "RateLimit-Remaining",
+      "RateLimit-Reset",
+    ],
+    credentials: true,
+    maxAge: 600,
+  }),
+);
+
+/**
+ * A body cap, because every route below parses what it is handed. Without
+ * this a single request can make the process allocate until it dies, and
+ * no amount of validation downstream helps -- the allocation happens
+ * first.
+ */
+app.use("*", bodyLimit({ maxSize: env.MAX_BODY_KB * 1024 }));
+
+/**
+ * Rate limits on the surfaces a stranger can write to.
+ *
+ * Not a quota system -- see limits.ts for what this does and does not
+ * promise. The costs say which requests are expensive: a checkout
+ * attempt reserves stock and talks to a gateway, so ten of them should
+ * exhaust an allowance that a hundred product views would not.
+ */
+app.use("/checkout", rateLimit(6));
+app.use("/cart/*", rateLimit(1));
+app.use("/enquiries", rateLimit(6));
+app.use("/stock-alerts", rateLimit(4));
+app.use("/reviews", rateLimit(6));
+app.use("/returns", rateLimit(4));
+app.use("/gift-cards/redeem", rateLimit(10));
+app.use("/account/erase", rateLimit(20));
+app.use("/payments/*", rateLimit(6));
 
 // Every route mounts here. The chained .route() calls are what extend
 // AppType, so hc<AppType> in the front ends knows about each one.

@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B11 done (bar courier/messaging webhooks), B12 next`
+**Status**: `B0-B12 done (bar courier/messaging webhooks), B13 scope-guarded`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -513,11 +513,51 @@ attempts climbing, nothing lost); the success path is proven at the SQL level.
 
 ### B12 — Cross-cutting · Medium
 
-- [ ] Idempotency middleware for every money-moving POST
-- [ ] Rate limiting — checkout, login-adjacent, stock alerts, enquiries (all anon-writable surfaces)
-- [ ] Publish the `hc` client type to both apps
-- [ ] CORS locked to the two app origins
-- [ ] **Validate**: OpenAPI spec covers every route; both apps typecheck against `hc`
+- [x] Idempotency middleware for every money-moving POST
+- [x] Rate limiting — checkout, cart, enquiries, stock alerts, reviews, returns, gift-card redemption, erasure, payments
+- [x] Publish the `hc` client type — `packages/client`
+- [x] CORS locked to configured origins, and **closed when none are set**
+- [x] Request body cap (not in the original list; one line, and without it a single request can allocate until the process dies)
+- [x] **Validate**: the spec covers every route, and no route is declared with `app.get(...)`; `@ecom/client` typechecks against `hc`
+
+**Decided here.**
+
+*CORS is closed by default.* With `CORS_ORIGINS` unset no browser origin is
+allowed. A permissive policy on a service holding the service key is how a
+shopper's session gets driven from a page they never opened. Server-to-server
+callers — webhooks, cron, curl — send no `Origin` and are unaffected.
+
+*The rate limiter is per-instance and per-IP, and says so.* It is a guard against
+a script hammering `/enquiries`, not a quota system: three containers means three
+times the limit. Set `RATE_LIMIT_PER_MINUTE=0` where a load balancer already does
+this properly, because two limiters disagreeing is worse than one.
+`X-Forwarded-For` is read **only** when `TRUSTED_PROXY_HEADER` names it —
+trusting it unconditionally lets any caller pick their own bucket by forging it.
+
+*The idempotency middleware is not a lock, and checkout keeps its own.* Two
+simultaneous requests with one key both proceed; the second gets a 409 only
+because the first has committed. That is enough for a human clicking twice, which
+is what it is for. Genuine concurrency needs the guarantee inside the
+transaction, which is exactly why `checkout()` claims its key in the same
+transaction that reserves the stock.
+
+*`packages/client` exists so a front end cannot import the server.* `@ecom/api`'s
+entry pulls in `app.ts` → `env.ts`, which throws at import without the service
+key — as it always would in a browser. The client imports `AppType` with `import
+type`, which is erased before the bundler sees it.
+
+**Found here**: two bugs the tests caught. `idempotency_keys.customer_id` has a
+foreign key to `customers`, and a staff member has no row there — so every
+staff-initiated claim failed on the FK and answered 500. And `apps/api` used
+`Bun.CryptoHasher`, which forced `@types/bun` onto anything reading the API's
+types; both hashers now use `node:crypto`.
+
+**Not done**: `apps/admin` and `apps/store` do not exist, so "both apps typecheck
+against `hc`" cannot be verified. `packages/client` typechecks, which is the same
+code path.
+
+**Still open** (flagged in B8, in no phase's checklist): checkout cannot *spend*
+store credit. `credit_ledger` has the `order_payment` reason waiting for it.
 
 ### B13 — Realtime · Low · *scope-guarded*
 
@@ -593,5 +633,5 @@ admin's read-only screens.
 | B9 Invoicing | **done** | `20260801001800_invoicing.sql` |
 | B10 Customers & support | **done** | `20260801001900_support.sql`; closes a live erasure hole |
 | B11 Jobs | **done** | `20260801002000_jobs.sql`; outbox drain + pg_cron fallback |
-| B12 Cross-cutting | not started | |
+| B12 Cross-cutting | **done** | CORS closed by default, rate limits, `@ecom/client` |
 | B13 Realtime | scope-guarded | Supabase Realtime unless a screen demands more |

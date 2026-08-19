@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { app } from "../src/app";
+import { resetRateLimits } from "../src/limits";
 
 /**
  * In-process, so nothing reaches Postgres. The behaviour that matters --
@@ -17,6 +18,12 @@ const doc = async () =>
     paths: Record<string, Record<string, { security?: unknown[] }>>;
     components: { schemas: Record<string, unknown> };
   };
+
+// Every in-process request shares one rate-limit bucket: app.request()
+// has no socket address, so clientKey() falls back to a single key.
+// Without this, whichever test runs later gets a 429 instead of the
+// status it is asserting.
+beforeEach(resetRateLimits);
 
 describe("B8 the code is said once", () => {
   test("only the issue response carries a code field", async () => {

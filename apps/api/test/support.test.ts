@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { app } from "../src/app";
+import { resetRateLimits } from "../src/limits";
 
 /**
  * B10's validation bullet -- "a customer cannot read an internal ticket
@@ -17,6 +18,12 @@ const doc = async () =>
     paths: Record<string, Record<string, { security?: unknown[] }>>;
     components: { schemas: Record<string, unknown> };
   };
+
+// Every in-process request shares one rate-limit bucket: app.request()
+// has no socket address, so clientKey() falls back to a single key.
+// Without this, whichever test runs later gets a 429 instead of the
+// status it is asserting.
+beforeEach(resetRateLimits);
 
 describe("B10 the customer view carries nothing staff-only", () => {
   // The schemas reference each other by $ref, so a substring search over

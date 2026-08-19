@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import { app } from "../src/app";
+import { resetRateLimits } from "../src/limits";
 import { requestHash } from "../src/routes/checkout";
 
 /**
@@ -36,6 +37,12 @@ const post = (patch: Record<string, unknown> = {}, headers: Record<string, strin
     },
     body: JSON.stringify({ ...body, ...patch }),
   });
+
+// Every in-process request shares one rate-limit bucket: app.request()
+// has no socket address, so clientKey() falls back to a single key.
+// Without this, whichever test runs later gets a 429 instead of the
+// status it is asserting.
+beforeEach(resetRateLimits);
 
 describe("B5 request hashing", () => {
   test("key order does not change the hash", () => {

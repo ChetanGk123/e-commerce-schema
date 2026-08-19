@@ -1,0 +1,20 @@
+{
+  "name": "@ecom/client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ecom/api": "workspace:*",
+    "hono": "^4"
+  },
+  "devDependencies": {
+    "typescript": "^5.9",
+    "@types/node": "^22"
+  }
+}
