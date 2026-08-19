@@ -1,6 +1,7 @@
 import { swaggerUI } from "@hono/swagger-ui";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
+import { RETAINED_304_HEADERS, etag } from "hono/etag";
 import { timeout } from "hono/timeout";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
@@ -146,6 +147,72 @@ app.use("/returns", rateLimit(4));
 app.use("/gift-cards/redeem", rateLimit(10));
 app.use("/account/erase", rateLimit(20));
 app.use("/payments/*", rateLimit(6));
+
+/**
+ * Caching, and the default is no-store.
+ *
+ * That default is the load-bearing half. Every route below except the
+ * catalog answers with someone's cart, someone's order or someone's
+ * profile, and a response carrying no Cache-Control at all is not a
+ * response that will not be cached -- it is one where the decision has
+ * been left to whatever sits in front of it. Saying nothing is not the
+ * same as saying no.
+ */
+app.use("*", async (c, next) => {
+  await next();
+  if (!c.res.headers.has("Cache-Control")) {
+    c.res.headers.set("Cache-Control", "no-store");
+  }
+});
+
+/**
+ * The storefront catalog is the exception, and the only one: every route
+ * under /catalog goes through anonClient(), so the bytes do not depend on
+ * who asked and `public` is the truth rather than a hope.
+ *
+ * Sixty seconds because these rows carry stock. A stale `inStock` sends a
+ * shopper to a checkout that fails at the reservation -- a disappointment,
+ * not an oversell, because the thing that actually prevents overselling is
+ * the stock >= 0 constraint and it is nowhere near this cache. Long enough
+ * to absorb the burst when a listing page fans out into ten product pages;
+ * short enough that a sold-out variant does not stay bookable for a whole
+ * browsing session.
+ *
+ * The ETag does not save the query. The handler runs either way and the
+ * digest is taken of what it returned; what a 304 saves is the body on the
+ * wire, which is the part a phone on a train is paying for.
+ */
+const CATALOG_MAX_AGE = 60;
+
+app.use(
+  "/catalog/*",
+  etag({
+    // Hono's 304 keeps six headers and drops everything else, and for a
+    // cross-origin caller that drops the CORS headers with them: the
+    // browser revalidates, gets a 304 with no Access-Control-Allow-Origin,
+    // and fails the request it was one header away from serving out of its
+    // own cache. An ETag whose 304 does not work is worse than no ETag,
+    // because it only breaks for the callers who cached successfully.
+    //
+    // Vary is appended by the cors middleware after this one unwinds, so
+    // it survives on its own.
+    retainedHeaders: [
+      ...RETAINED_304_HEADERS,
+      "access-control-allow-origin",
+      "access-control-allow-credentials",
+      "access-control-expose-headers",
+      "x-request-id",
+    ],
+  }),
+);
+app.use("/catalog/*", async (c, next) => {
+  await next();
+  // Only success. A 404 falls through to no-store -- a product going live
+  // should not spend a minute shadowed by a cached "no such product".
+  if (c.res.ok) {
+    c.res.headers.set("Cache-Control", `public, max-age=${CATALOG_MAX_AGE}`);
+  }
+});
 
 // Every route mounts here. The chained .route() calls are what extend
 // AppType, so hc<AppType> in the front ends knows about each one.

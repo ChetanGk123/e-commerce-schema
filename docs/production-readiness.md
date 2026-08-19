@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#10, #14, #17 done; #1 and #11 part-done. The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#10, #14, #17 done; #1 and #11 part-done. Every smaller hole is closed. What is left is #12/#13 (infrastructure), #15 (lockout) and #16 (a decision). The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -445,7 +445,26 @@ that were never built, and the seam that nothing tests.**
       clause, not left to RLS — the function is `security definer`, so RLS does
       not apply to it at all, and someone else's order answers 404 rather than
       403.
-- [ ] No `Cache-Control` or `ETag` on the public catalog
+- [x] `Cache-Control` and `ETag` — **done**. `hono/etag` on `/catalog/*`,
+      `public, max-age=60` on the successes, and **`no-store` as the default
+      for everything else** — that default is the half that mattered. The API
+      was sending no `Cache-Control` at all, which is not the same as saying
+      no: it leaves the decision to whatever sits in front, on routes that
+      answer with someone's cart and someone's orders. Sixty seconds because
+      catalog rows carry stock; a stale `inStock` costs a shopper a failed
+      reservation, not the store an oversell, because `stock >= 0` is nowhere
+      near this cache. Errors stay `no-store` — a product going live should
+      not spend a minute shadowed by a cached 404.
+
+      The subtlety was the 304. Hono rebuilds it from a six-header allowlist,
+      which drops `Access-Control-Allow-Origin` with everything else: the 200
+      keeps working and revalidation fails, so it breaks only for the callers
+      whose cache was working. The CORS trio is retained explicitly and a test
+      pins it.
+
+      The ETag saves the body, not the query — the handler runs either way and
+      the digest is taken of what it returned. Saving the query is a cache in
+      front of the API, which is a Traefik decision, not this one.
 
 ---
 

@@ -161,3 +161,29 @@ describe("B4 admin catalog is behind auth", () => {
     expect(get?.responses["403"]).toBeUndefined();
   });
 });
+
+describe("caching", () => {
+  /**
+   * The 200-with-an-ETag path needs real rows, so it lives in the seam
+   * suite. What can be proved here is the half that matters more: that
+   * nothing outside the catalog is cacheable, and that a catalog request
+   * which failed does not get the catalog's header by association.
+   */
+  test.each([
+    ["/health"],
+    ["/me"],
+    ["/openapi.json"],
+    ["/orders/track?orderNumber=X&email=a@b.c"],
+  ])("%s is no-store", async (path) => {
+    const res = await app.request(path);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("a rejected catalog request is not cached", async () => {
+    // Sixty seconds of a cached 400 would outlive the typo that caused it.
+    const res = await app.request("/catalog/products?limit=500");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("etag")).toBeNull();
+  });
+});

@@ -82,6 +82,9 @@ export function startKongStandIn(): { url: string; stop: () => void } {
  * Must run before app.ts is imported -- env.ts validates at import time --
  * so the test file imports the app dynamically after calling this.
  */
+/** The browser origin configureEnv() allows. */
+export const ALLOWED_ORIGIN = "https://store.test";
+
 export async function configureEnv(kongUrl: string): Promise<void> {
   process.env.SUPABASE_URL = kongUrl;
   // Real Supabase keys are themselves JWTs carrying the role. supabase-js
@@ -93,6 +96,9 @@ export async function configureEnv(kongUrl: string): Promise<void> {
   process.env.SUPABASE_JWT_SECRET = SECRET;
   process.env.JOBS_INTERVAL_SECONDS = "0";
   process.env.RATE_LIMIT_PER_MINUTE = "0";
+  // One allowed browser origin, so the caching tests can check that a 304
+  // still carries the CORS headers a browser needs to accept it.
+  process.env.CORS_ORIGINS = ALLOWED_ORIGIN;
 }
 
 /** One value back out of the database, for asserting what a trigger did. */

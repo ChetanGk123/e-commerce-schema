@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
 import {
+  ALLOWED_ORIGIN,
   PGRST_URL,
   configureEnv,
   mintToken,
@@ -1739,5 +1740,100 @@ describe.skipIf(!up)("silent failures reach a person", () => {
     const told = Number(await raise("ops_test_two"));
     await sql(`update staff_users set is_active = true where id = '${OWNER}';`);
     expect(told).toBe(0);
+  });
+});
+
+/**
+ * Catalog caching.
+ *
+ * The header is one line; the 304 is where this goes wrong quietly. Hono
+ * rebuilds the response from a small allowlist of headers, so anything
+ * not on that list vanishes on revalidation only -- the 200 keeps
+ * working, the 304 does not, and the callers it breaks are exactly the
+ * ones whose cache was working.
+ */
+describe.skipIf(!up)("the storefront catalog is cacheable", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+  });
+
+  test("a catalog page is public and carries an ETag", async () => {
+    const res = await app.request("/catalog/products?limit=5");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, max-age=60");
+    expect(res.headers.get("etag")).toMatch(/^"[0-9a-f]+"$/);
+  });
+
+  test("the same page hashes the same twice, or no cache ever hits", async () => {
+    // A digest that changes per request -- a timestamp in the body, a
+    // request id echoed into it -- would leave the header in place and
+    // the 304 permanently unreachable.
+    const a = await app.request("/catalog/products?limit=5");
+    const b = await app.request("/catalog/products?limit=5");
+    expect(b.headers.get("etag")).toBe(a.headers.get("etag"));
+  });
+
+  test("If-None-Match answers 304 with no body", async () => {
+    const first = await app.request("/catalog/products?limit=5");
+    const tag = first.headers.get("etag")!;
+
+    const second = await app.request("/catalog/products?limit=5", {
+      headers: { "If-None-Match": tag },
+    });
+    expect(second.status).toBe(304);
+    expect(await second.text()).toBe("");
+    // Both are required on a 304: without Cache-Control the browser has
+    // nothing to refresh the entry's lifetime with and asks again next
+    // time, which is most of the saving gone.
+    expect(second.headers.get("etag")).toBe(tag);
+    expect(second.headers.get("cache-control")).toBe("public, max-age=60");
+  });
+
+  test("a stale ETag gets the whole body back", async () => {
+    const res = await app.request("/catalog/products?limit=5", {
+      headers: { "If-None-Match": '"0000000000000000000000000000000000000000"' },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { items: unknown[] }).items.length).toBeGreaterThan(0);
+  });
+
+  test("the 304 keeps the CORS headers a browser needs to accept it", async () => {
+    const headers = { Origin: ALLOWED_ORIGIN };
+    const first = await app.request("/catalog/products?limit=5", { headers });
+    expect(first.headers.get("access-control-allow-origin")).toBe(ALLOWED_ORIGIN);
+
+    const second = await app.request("/catalog/products?limit=5", {
+      headers: { ...headers, "If-None-Match": first.headers.get("etag")! },
+    });
+    expect(second.status).toBe(304);
+    // Drop this and the browser rejects its own cached copy on
+    // revalidation, which reads as an intermittent CORS failure.
+    expect(second.headers.get("access-control-allow-origin")).toBe(ALLOWED_ORIGIN);
+    expect(second.headers.get("access-control-allow-credentials")).toBe("true");
+    expect(second.headers.get("vary")).toMatch(/Origin/);
+  });
+
+  test("a product nobody sells is not cached as missing", async () => {
+    const res = await app.request("/catalog/products/no-such-product-here");
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("an order is never cacheable", async () => {
+    // The catalog rule is scoped to /catalog. If it ever leaked wider,
+    // this is the assertion that fails first.
+    const res = await app.request("/orders", {
+      headers: {
+        Authorization: `Bearer ${await mintToken("authenticated", "aaaaaaaa-0000-4000-8000-000000000001")}`,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("etag")).toBeNull();
   });
 });
