@@ -1,7 +1,9 @@
 import { createMiddleware } from "hono/factory";
+import { routePath } from "hono/route";
 import { pino } from "pino";
 
 import { env } from "./env";
+import { recordRequest } from "./metrics";
 
 export const logger = pino({
   level: env.LOG_LEVEL,
@@ -60,8 +62,20 @@ export const requestLogger = createMiddleware(async (c, next) => {
   try {
     await next();
   } finally {
-    const ms = Math.round(performance.now() - start);
+    const elapsed = performance.now() - start;
+    const ms = Math.round(elapsed);
     const status = c.res.status;
+
+    // The registered pattern, not the path: `/orders/:id`, so Prometheus
+    // gets one series per route instead of one per order. Unmatched
+    // requests come back as the catch-all middleware's own `/*`, which
+    // would be a misleading label for a 404, so they are named as what
+    // they are. The scrape itself is left out -- counting the observer
+    // tells you nothing about the service.
+    const matched = routePath(c);
+    if (c.req.path !== "/metrics") {
+      recordRequest(method, matched === "/*" ? "unmatched" : matched, status, elapsed / 1000);
+    }
 
     // Start and finish are separate lines on purpose: a request that hangs or
     // crashes the process still leaves the "-->" behind, so you can see what

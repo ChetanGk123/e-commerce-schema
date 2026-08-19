@@ -145,6 +145,21 @@ const schema = z.object({
     .default("true")
     .transform((v) => v === "true"),
 
+  /**
+   * Bearer token a Prometheus scraper must present at GET /metrics.
+   *
+   * Unset means the endpoint does not exist -- 404, like any other path
+   * this service does not serve. Closed by default for the same reason
+   * CORS is: /metrics publishes the route table, the traffic shape and
+   * the state of the mail queue, which is a free map of the service for
+   * anyone who asks.
+   *
+   *   scrape_configs:
+   *     - job_name: ecom-api
+   *       authorization: { credentials: "<this value>" }
+   */
+  METRICS_TOKEN: blankAsUnset(z.string().min(16).optional()),
+
   /** Largest request body accepted, in kilobytes. */
   MAX_BODY_KB: z.coerce.number().int().min(1).max(10_240).default(256),
 

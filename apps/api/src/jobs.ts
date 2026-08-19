@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { publishOps } from "./metrics";
 import { logger as log } from "./logger";
 import { type Message, mailerConfigured, send } from "./mailer";
 import { type RazorpayEvent, processEvent } from "./routes/webhooks";
@@ -276,6 +277,18 @@ async function runSweepers(): Promise<void> {
 async function checkOps(): Promise<void> {
   const db = serviceClient();
 
+  // Collected as we go and published once at the end, so GET /metrics
+  // costs a scraper nothing: these are the same numbers the alerts below
+  // are decided from, which is the point -- a dashboard disagreeing with
+  // the alert that woke you is worse than no dashboard.
+  const snapshot = {
+    outbox: {} as Record<string, number>,
+    outboxStalled: 0,
+    webhooksUnprocessed: 0,
+    webhooksExhausted: 0,
+    authLockouts: 0,
+  };
+
   const outbox = await db.rpc("outbox_health");
   if (outbox.error) {
     log.error({ err: outbox.error.message }, "jobs.ops_check_failed");
@@ -286,6 +299,8 @@ async function checkOps(): Promise<void> {
       stalled_sending: number;
     };
     const queued = h.by_status?.queued ?? 0;
+    snapshot.outbox = h.by_status ?? {};
+    snapshot.outboxStalled = h.stalled_sending;
 
     if (h.stalled_sending > 0) {
       log.error({ stalled: h.stalled_sending }, "ops.outbox_stalled");
@@ -333,6 +348,7 @@ async function checkOps(): Promise<void> {
     return;
   }
   const stuck = exhausted.count ?? 0;
+  snapshot.webhooksExhausted = stuck;
   if (stuck > 0) {
     log.error({ stuck }, "ops.webhooks_exhausted");
     await alert(
@@ -357,6 +373,7 @@ async function checkOps(): Promise<void> {
     return;
   }
   const accounts = locked.count ?? 0;
+  snapshot.authLockouts = accounts;
   if (accounts >= STUFFING_ACCOUNTS) {
     log.error({ accounts }, "ops.credential_stuffing");
     await alert(
@@ -367,6 +384,14 @@ async function checkOps(): Promise<void> {
       { accounts },
     );
   }
+
+  // Only on the way out, and only if every query above succeeded. A
+  // partial snapshot would publish real outbox numbers next to a zero
+  // for a webhook count that failed to load, and a zero on
+  // ecom_webhooks_exhausted is the one reading nobody double-checks.
+  // Skipping it instead leaves the last good values in place with
+  // ecom_ops_snapshot_age_seconds climbing, which says what happened.
+  publishOps(snapshot);
 }
 
 /**

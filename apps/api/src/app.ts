@@ -10,6 +10,7 @@ import { type DbError, mapDatabaseError } from "./errors";
 import { env } from "./env";
 import { rateLimit } from "./limits";
 import { requestLogger } from "./logger";
+import { render } from "./metrics";
 import { validationHook } from "./schemas";
 import { adminCatalogRoute } from "./routes/admin-catalog";
 import { cartRoute } from "./routes/cart";
@@ -243,6 +244,36 @@ const routes = app
   .route("/", supportRoute)
   .route("/", engagementRoute)
   .route("/", jobsRoute);
+
+/**
+ * Prometheus scrape target.
+ *
+ * Off unless METRICS_TOKEN is set, and 404 rather than 401 when it is
+ * not -- same reasoning as the docs above. /metrics publishes the route
+ * table, the traffic shape and the state of the mail queue, which is a
+ * free map of this service for anybody who asks for it.
+ *
+ * Not behind requireStaff: a scraper has no account, and giving it one
+ * would put a staff token in a Prometheus config file. A bearer token
+ * that grants exactly one read-only endpoint is the smaller thing to
+ * leak.
+ *
+ * Deliberately outside the OpenAPI document. It is not part of the API
+ * any client codegen should see, and hc<AppType> has no business
+ * knowing it exists.
+ */
+if (env.METRICS_TOKEN) {
+  app.get("/metrics", (c) => {
+    if (c.req.header("authorization") !== `Bearer ${env.METRICS_TOKEN}`) {
+      // Same answer as no token configured at all, so a wrong token
+      // cannot be told apart from an endpoint that was never turned on.
+      return c.notFound();
+    }
+    return c.text(render(), 200, {
+      "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+    });
+  });
+}
 
 /**
  * DOCS_PUBLIC=false hides both.

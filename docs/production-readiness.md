@@ -297,10 +297,32 @@ that were never built, and the seam that nothing tests.**
       would otherwise be indistinguishable from a fix.
       **Still open, and needing a decision rather than effort:** metrics and
       tracing. Prometheus, OTLP and "nothing, read the logs" are different
-      products with different infrastructure behind them, and guessing which
-      would mean building a `/metrics` endpoint nothing scrapes. A notification
-      is seen when someone opens the admin — better than never, worse than a
-      phone ringing.
+      products with different infrastructure behind them. **Prometheus was
+      chosen**, and `GET /metrics` now serves it — `http_requests_total` and
+      `http_request_duration_seconds` by route pattern, method and status,
+      plus gauges for the outbox, webhooks and active lockouts.
+      *Hand-rolled, no prom-client.* The exposition format is a few lines of
+      text; the library brings a default registry, a global clock and process
+      collectors none of this wants.
+      *The route label is the registered pattern* (`/catalog/products/:slug`),
+      never the path. Labelling by path gives Prometheus a time series per
+      product slug, which is how a metrics endpoint takes down the thing it
+      was installed to watch.
+      *The gauges are published by the jobs tick, not queried on scrape* — a
+      scrape must not cost three database round trips, and the tick already
+      has the numbers, so the alert and the dashboard cannot disagree. The
+      price is staleness, so `ecom_ops_snapshot_age_seconds` is published
+      beside them, and a partial snapshot is deliberately **not** published: a
+      zero on `ecom_webhooks_exhausted` is the one reading nobody
+      double-checks.
+      *Closed by default.* No `METRICS_TOKEN`, no endpoint — 404, and a wrong
+      token gets the same 404, so it cannot be told from an endpoint that was
+      never turned on.
+      **Tracing was not built.** Per-request traces across API→PostgREST→
+      Postgres need a collector to run and an SDK in the dependency tree; the
+      notification and the `ops.*` log lines are still what actually reach a
+      person, and a notification is seen when someone opens the admin —
+      better than never, worse than a phone ringing.
 
 - [ ] **12. The rate limiter is per-instance.** Documented honestly in
       `src/limits.ts`, and simply wrong the moment a second container starts.
