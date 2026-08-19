@@ -1136,3 +1136,126 @@ describe.skipIf(!up)("a catalog can be organised", () => {
     expect(await sqlValue(`select count(*) from collections where id = '${id}'`)).toBe("1");
   });
 });
+
+/**
+ * Guest order tracking.
+ *
+ * Guests are a supported way to buy here, and until now that was the end
+ * of it: no account to sign into, no route that would answer, so the
+ * order was invisible to the person who placed it the moment they closed
+ * the confirmation email.
+ *
+ * The scoping is in the query rather than in RLS -- a guest order has no
+ * customer_id, so no policy could grant it -- which makes "does the match
+ * actually require both halves" a question only a real database answers.
+ */
+describe.skipIf(!up)("a guest can find their own order", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const GUEST_EMAIL = "guest-tracker@test.local";
+  let orderNumber: string;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`update store_settings set cod_enabled = true where id = 1;`);
+
+    const list = await app.request("/catalog/products?limit=1");
+    const { items } = (await list.json()) as { items: { slug: string }[] };
+    const detail = await app.request(`/catalog/products/${items[0]!.slug}`);
+    const product = (await detail.json()) as { variants: { id: string; stock: number }[] };
+    const sellable = product.variants.find((v) => v.stock > 0)!;
+
+    // No Authorization header at all: this is a guest checkout, which
+    // writes no customers row and leaves orders.customer_id null.
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `guest-${crypto.randomUUID()}`,
+      },
+      body: JSON.stringify({
+        items: [{ variant_id: sellable.id, quantity: 1 }],
+        email: GUEST_EMAIL,
+        contact_phone: "9876543210",
+        shipping_address: {
+          line1: "1 Test Street",
+          city: "Bengaluru",
+          state: "Karnataka",
+          postal_code: "560001",
+          country: "IN",
+        },
+        payment_method: "cod",
+      }),
+    });
+    expect(res.status).toBe(201);
+    orderNumber = ((await res.json()) as { orderNumber: string }).orderNumber;
+  });
+
+  const track = (number: string, email: string) =>
+    app.request(`/orders/track?order_number=${encodeURIComponent(number)}&email=${encodeURIComponent(email)}`);
+
+  test("the order really is a guest order, with nobody to sign in as", async () => {
+    // If this had a customer_id the test below would prove nothing --
+    // it would just be an ordinary order read.
+    expect(
+      await sqlValue(`select coalesce(customer_id::text, '') from orders where order_number = '${orderNumber}'`),
+    ).toBe("");
+  });
+
+  test("number plus email returns it, with the timeline", async () => {
+    const res = await track(orderNumber, GUEST_EMAIL);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      orderNumber: string;
+      items: unknown[];
+      events: unknown[];
+      status: string;
+    };
+    expect(body.orderNumber).toBe(orderNumber);
+    expect(body.items.length).toBeGreaterThan(0);
+    expect(body.events.length).toBeGreaterThan(0);
+  });
+
+  test("the email is matched case-insensitively, because people type it", async () => {
+    // orders.email is citext, so this costs nothing and saves a support
+    // ticket from anyone whose mail client capitalised the address.
+    const res = await track(orderNumber, GUEST_EMAIL.toUpperCase());
+    expect(res.status).toBe(200);
+  });
+
+  test("the order number alone is not enough", async () => {
+    // next_order_number() uses an ordinary sequence, so numbers are close
+    // to consecutive and the next one is guessable. The email is the
+    // second factor.
+    const res = await track(orderNumber, "someone-else@test.local");
+    expect(res.status).toBe(404);
+  });
+
+  test("a wrong email and an unknown order are indistinguishable", async () => {
+    // Otherwise this is an oracle for "has this address ordered here",
+    // answerable from a guessed order number.
+    const wrongEmail = await track(orderNumber, "someone-else@test.local");
+    const noSuchOrder = await track("ORD-0000-00000", GUEST_EMAIL);
+    expect(noSuchOrder.status).toBe(wrongEmail.status);
+
+    // Everything except requestId, which is unique per request by design
+    // and is the one difference a caller is meant to see.
+    const codeAndMessage = async (r: Response) => {
+      const { error } = (await r.json()) as { error: { code: string; message: string } };
+      return { code: error.code, message: error.message };
+    };
+    expect(await codeAndMessage(noSuchOrder)).toEqual(await codeAndMessage(wrongEmail));
+  });
+
+  test("no internal fields ride along", async () => {
+    const body = await (await track(orderNumber, GUEST_EMAIL)).text();
+    // The customer projection is deliberately a different shape from the
+    // admin one: risk scores, UTM columns and internal notes are absent
+    // from the select list, not filtered afterwards.
+    for (const leak of ["risk_score", "riskScore", "risk_flags", "utm_", "customerId"]) {
+      expect(body).not.toContain(leak);
+    }
+  });
+});

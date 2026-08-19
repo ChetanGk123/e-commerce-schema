@@ -367,8 +367,16 @@ that were never built, and the seam that nothing tests.**
 
 ## Smaller holes
 
-- [ ] Guest order tracking. `routes/orders.ts:335` says a guest tracks from the
-      link in their confirmation email; no route serves that link
+- [x] Guest order tracking — **done**. `GET /orders/track?order_number=&email=`.
+      Guests are a supported way to buy here and that was the end of it: no
+      account to sign into, no route that would answer. Order number **and**
+      email, because `next_order_number()` uses an ordinary sequence and the
+      next number is guessable; `citext` makes the email match
+      case-insensitive. A wrong email and an unknown order give the identical
+      404, so it cannot be used to find out whether an address has ordered
+      here. Registered before `/orders/{id}` — that route's `requireAuth` runs
+      ahead of its uuid validation, so second in the chain every guest lookup
+      answered 401.
 - [ ] Checkout cannot spend store credit — `credit_ledger.order_payment` is
       waiting for it (already flagged in `api-plan.md` B12)
 - [ ] No address edit: `POST` and `DELETE` only, no `PATCH`

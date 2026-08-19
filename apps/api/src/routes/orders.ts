@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { type Caller, requireAuth, requireStaff } from "../auth";
 import { throwOnDbError } from "../errors";
+import { serviceClient } from "../supabase";
 import { idempotent } from "../idempotency";
 import { jsonError, pageQuery, validationHook } from "../schemas";
 
@@ -511,7 +512,85 @@ async function readAdminOrder(
   return data as unknown as OrderRow;
 }
 
+/**
+ * How a guest sees the order they placed.
+ *
+ * Guests are a supported way to buy here -- checkout takes an email and
+ * writes no customers row -- and until now that was the end of it. There
+ * was no account to sign into and no route that would answer, so a guest
+ * order was invisible to the person who placed it the moment the
+ * confirmation email was read. The comment on GET /orders has said "a
+ * guest tracks their order from the link in their confirmation email"
+ * since B14; this is the thing that link points at.
+ *
+ * The order number alone is not enough. next_order_number() uses an
+ * ordinary sequence, so numbers are close to consecutive and guessing
+ * the next one is trivial -- the email is the second factor, and both
+ * have to match. citext on orders.email makes that comparison
+ * case-insensitive, which matters when the address is typed by hand.
+ *
+ * Wrong email and unknown order answer identically. Distinguishing them
+ * would turn this into an oracle for "did this person order here",
+ * answerable from an order number and a guess.
+ */
+const trackOrder = createRoute({
+  method: "get",
+  path: "/orders/track",
+  tags: ["orders"],
+  summary: "Look up an order without an account",
+  description:
+    "For guests, who have no account to sign into. Both the order number and the email address used at checkout must match; either one wrong gives the same 404, so this cannot be used to find out whether an address has ordered here.\n\nWorks for member orders too -- someone who ordered while signed in can still track by number and email.\n\nRate limited more tightly than the rest of the API, because an order number and an email is a guessable pair.",
+  request: {
+    query: z.object({
+      order_number: z.string().min(3).max(40),
+      email: z.string().email().max(254),
+    }),
+  },
+  responses: {
+    200: {
+      description: "The order",
+      content: { "application/json": { schema: Order } },
+    },
+    400: jsonError("Missing or malformed parameters"),
+    404: jsonError("No order matches that number and address"),
+    429: jsonError("Too many lookups"),
+  },
+});
+
 export const ordersRoute = new OpenAPIHono({ defaultHook: validationHook })
+  /**
+   * FIRST in the chain, deliberately. `/orders/track` and `/orders/{id}`
+   * are both matched by the latter's pattern, and requireAuth on that
+   * route runs before its uuid param validation -- so registered second,
+   * every guest lookup answered 401 instead of finding the order.
+   */
+  .openapi(trackOrder, async (c) => {
+    const { order_number, email } = c.req.valid("query");
+
+    // The service key, scoped in the query rather than by RLS. A guest
+    // order has no customer_id, so there is no policy that could grant
+    // it -- which is exactly why the match below has to be exact and
+    // has to include the email.
+    const { data, error } = await serviceClient()
+      .from("orders")
+      .select(OWN_SELECT)
+      .eq("order_number", order_number)
+      .eq("email", email)
+      .maybeSingle();
+    throwOnDbError(error);
+
+    if (!data) {
+      // Deliberately the same answer for "no such order" and "that is not
+      // the address on it".
+      c.get("log")?.warn({ order_number }, "orders.track_miss");
+      throw new HTTPException(404, {
+        message: "No order matches that number and address.",
+        cause: { code: "order_not_found" },
+      });
+    }
+
+    return c.json(shape(data as unknown as OrderRow), 200);
+  })
   .openapi(mine, async (c) => {
     const { limit, offset } = c.req.valid("query");
     const caller = c.get("caller");

@@ -133,6 +133,11 @@ app.use("/auth/sign-up", rateLimit(15));
 app.use("/auth/password/forgot", rateLimit(20));
 app.use("/auth/password/change", rateLimit(10));
 app.use("/checkout", rateLimit(6));
+// An order number and an email is a guessable pair, and order numbers
+// come from an ordinary sequence. Cost 12 allows five lookups a minute
+// from one address -- enough for a person refreshing, not enough to walk
+// the sequence.
+app.use("/orders/track", rateLimit(12));
 app.use("/cart/*", rateLimit(1));
 app.use("/enquiries", rateLimit(6));
 app.use("/stock-alerts", rateLimit(4));
