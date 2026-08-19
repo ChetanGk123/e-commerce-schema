@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2, #3, #4, #5, #7, #8, #9, #10, #17 done; #1 part-done. The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#5, #6, #7, #8, #9, #10, #17 done; #1 part-done. The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -41,7 +41,7 @@ that were never built, and the seam that nothing tests.**
 | 1 | Catalog writes — **products and variants done**; options, images, categories still SQL | |
 | ~~2–4~~ | ~~No discount, settings or shipping writes~~ | **done** |
 | 14 | RLS ignores `staff_users.role` | A warehouse JWT reads `cost_price` and all PII |
-| 6 | Nothing marks a shipment delivered | Orders stay "shipped" permanently |
+| ~~6~~ | ~~Nothing marks a shipment delivered~~ | **done** |
 
 ---
 
@@ -134,12 +134,30 @@ that were never built, and the seam that nothing tests.**
       ever be sent — and that false alarm swallowed the real `stalled_sending`
       one behind it in the warning ladder.
 
-- [ ] **6. Nothing can mark a shipment delivered.** `routes/fulfilment.ts` posts
-      and reads shipments; `admin_ship_order` is its only RPC. `shipments.delivered_at`
-      and order status `delivered` are unreachable, so every shipped order stays
-      "shipped". Returns do not gate on it, so this is reporting and customer
-      experience rather than a money bug — but it is also what the deferred
-      courier webhook (`api-plan.md` B6) would have driven.
+- [x] **6. Nothing could mark a shipment delivered.** — **done**.
+      `PATCH /admin/shipments/{id}`, on a new `admin_update_shipment()` RPC
+      (`20260801002200_delivery.sql`).
+      *The gap:* `admin_ship_order()` wrote `label_created` and nothing could
+      move a shipment afterwards. Six of the seven values `shipments.status`
+      allows were unreachable, `delivered_at` was never written, and
+      `orders.status` could not become `delivered` at all — so every order this
+      store ever fulfilled stayed "shipped".
+      *An RPC, not two UPDATEs*, for the same reason every other `admin_*`
+      function is one: it touches the shipment, the order and the timeline, and
+      a half-moved order is worse than an unmoved one.
+      *The order follows the last parcel, not this one.* `shipment_items`
+      exists so an order can ship in parts, so marking one parcel delivered
+      while another is in transit must not tell the customer it arrived. The
+      test ships one order as two parcels and asserts the order stays `shipped`
+      after the first and turns `delivered` after the second.
+      *`rto` and `lost` deliberately leave the order alone.* A returned or lost
+      parcel needs a person to choose between a refund, a reship and a carrier
+      claim; picking one here would be code making a commercial decision.
+      *Repeating a status is a no-op*, so a courier webhook redelivering
+      `delivered` is harmless — asserted by checking `order_events` still holds
+      exactly one delivery entry.
+
+---
 
 ---
 

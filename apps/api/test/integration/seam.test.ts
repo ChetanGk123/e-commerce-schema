@@ -531,3 +531,168 @@ describe.skipIf(!up)("store configuration writes", () => {
     });
   });
 });
+
+/**
+ * The end of the order lifecycle, which did not previously have one.
+ *
+ * The interesting case is partial fulfilment: an order shipped in two
+ * parcels must not tell the customer it arrived when the first one
+ * lands. That rule lives in admin_update_shipment(), counts rows in
+ * another table, and cannot be asserted anywhere but here.
+ */
+describe.skipIf(!up)("delivery closes the order", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  const BUYER = "aaaaaaaa-0000-4000-8000-000000000001";
+  let staffAuth: Record<string, string>;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values
+        ('${STAFF}', 'staff@test.local'), ('${BUYER}', 'buyer@test.local')
+        on conflict (id) do nothing;
+      insert into customers (id, email, full_name) values
+        ('${BUYER}', 'buyer@test.local', 'Buyer') on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do nothing;
+
+      -- The settings block above switches COD off store-wide, and these
+      -- orders pay by COD. Asserted independently of test order rather
+      -- than by hoping this file keeps running top to bottom.
+      update store_settings set cod_enabled = true where id = 1;
+    `);
+    staffAuth = { Authorization: `Bearer ${await mintToken("authenticated", STAFF)}` };
+  });
+
+  const send = (method: string, path: string, body?: unknown) =>
+    app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json", ...staffAuth },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  /** A paid order with two line items, so it can be shipped in two parcels. */
+  async function paidOrderWithTwoItems(): Promise<{ orderId: string; itemIds: string[] }> {
+    const list = await app.request("/catalog/products?limit=1");
+    const { items } = (await list.json()) as { items: { slug: string }[] };
+    const detail = await app.request(`/catalog/products/${items[0]!.slug}`);
+    const product = (await detail.json()) as { variants: { id: string; stock: number }[] };
+    const sellable = product.variants.filter((v) => v.stock > 1).slice(0, 2);
+    expect(sellable.length).toBeGreaterThan(1);
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `deliver-${crypto.randomUUID()}`,
+        Authorization: `Bearer ${await mintToken("authenticated", BUYER)}`,
+      },
+      body: JSON.stringify({
+        items: sellable.map((v) => ({ variant_id: v.id, quantity: 1 })),
+        email: "buyer@test.local",
+        contact_phone: "9876543210",
+        shipping_address: {
+          line1: "1 Test Street",
+          city: "Bengaluru",
+          state: "Karnataka",
+          postal_code: "560001",
+          country: "IN",
+        },
+        payment_method: "cod",
+      }),
+    });
+    expect(res.status).toBe(201);
+    // orderId, not id -- the checkout response names it for what it is.
+    const orderId = ((await res.json()) as { orderId: string }).orderId;
+
+    // COD is captured by staff, which is what makes the order shippable.
+    // The key is required here, not optional: capturing twice would take
+    // the stock twice.
+    const captured = await app.request(`/admin/orders/${orderId}/capture-cod`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `capture-${crypto.randomUUID()}`,
+        ...staffAuth,
+      },
+    });
+    expect(captured.status).toBe(200);
+
+    const ids = await sqlValue(
+      `select string_agg(id::text, ',') from order_items where order_id = '${orderId}'`,
+    );
+    return { orderId, itemIds: ids.split(",") };
+  }
+
+  test("one parcel of two does not mark the order delivered", async () => {
+    const { orderId, itemIds } = await paidOrderWithTwoItems();
+
+    const first = await send("POST", `/admin/orders/${orderId}/shipments`, {
+      items: [{ order_item_id: itemIds[0], quantity: 1 }],
+      carrier: "Seam Couriers",
+    });
+    expect(first.status).toBe(201);
+    const second = await send("POST", `/admin/orders/${orderId}/shipments`, {
+      items: [{ order_item_id: itemIds[1], quantity: 1 }],
+      carrier: "Seam Couriers",
+    });
+    expect(second.status).toBe(201);
+
+    const firstId = ((await first.json()) as { id: string }).id;
+    const secondId = ((await second.json()) as { id: string }).id;
+
+    const one = await send("PATCH", `/admin/shipments/${firstId}`, { status: "delivered" });
+    expect(one.status).toBe(200);
+    // Half the order is still in transit. Telling the customer it arrived
+    // would be a lie, and the kind that generates a support ticket.
+    expect((await one.json()) as { orderStatus: string }).toMatchObject({
+      orderStatus: "shipped",
+    });
+
+    const two = await send("PATCH", `/admin/shipments/${secondId}`, { status: "delivered" });
+    expect((await two.json()) as { orderStatus: string }).toMatchObject({
+      orderStatus: "delivered",
+    });
+
+    expect(await sqlValue(`select status from orders where id = '${orderId}'`)).toBe("delivered");
+    expect(
+      await sqlValue(
+        `select count(*) from order_events where order_id = '${orderId}' and event = 'delivered'`,
+      ),
+    ).toBe("1");
+    expect(
+      await sqlValue(`select delivered_at is not null from shipments where id = '${secondId}'`),
+    ).toBe("t");
+  });
+
+  test("the customer sees the delivery on their own order", async () => {
+    const mine = await app.request("/orders", {
+      headers: { Authorization: `Bearer ${await mintToken("authenticated", BUYER)}` },
+    });
+    const body = (await mine.json()) as { items: { status: string }[] };
+    expect(body.items.some((o) => o.status === "delivered")).toBe(true);
+  });
+
+  test("repeating a status is a no-op, not an error", async () => {
+    // A courier webhook redelivering "delivered" is the ordinary case.
+    const shipmentId = await sqlValue(
+      `select id from shipments where status = 'delivered' order by updated_at desc limit 1`,
+    );
+    const again = await send("PATCH", `/admin/shipments/${shipmentId}`, { status: "delivered" });
+    expect(again.status).toBe(200);
+
+    const orderId = await sqlValue(`select order_id from shipments where id = '${shipmentId}'`);
+    // Still exactly one timeline entry: a duplicate would show the
+    // customer their order was delivered twice.
+    expect(
+      await sqlValue(
+        `select count(*) from order_events where order_id = '${orderId}' and event = 'delivered'`,
+      ),
+    ).toBe("1");
+  });
+});
