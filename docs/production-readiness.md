@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#10, #13–#17 done; #1 and #11 part-done. Every smaller hole is closed. What is left needs a decision from you, not more code: #11's metrics destination, #12 (move the limiter to Traefik), and #1's last piece (the Storage backend for product images). The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: every item on this list is closed. #11's tracing half and #12's Traefik config are deliberate stopping points, not gaps — one is a decision about infrastructure you do not yet run, the other is config only you can apply. Everything else shipped with tests. The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -352,12 +352,30 @@ that were never built, and the seam that nothing tests.**
       person, and a notification is seen when someone opens the admin —
       better than never, worse than a phone ringing.
 
-- [ ] **12. The rate limiter is per-instance.** Documented honestly in
-      `src/limits.ts`, and simply wrong the moment a second container starts.
-      Move it to the load balancer and set `RATE_LIMIT_PER_MINUTE=0`, rather
-      than running two limiters that disagree. Same class of caveat, already
-      handled correctly: `idempotency.ts` is not a lock, and `checkout()` keeps
-      its own inside the transaction.
+- [x] **12. The rate limiter is per-instance** — **documented**, `setup.md` C8,
+      **and this entry's own advice was wrong.**
+      *"Move it to the load balancer and set `RATE_LIMIT_PER_MINUTE=0`"* does not
+      survive writing the config. Traefik's `rateLimit` is a token bucket per
+      middleware. What this limiter is, is **one shared budget per IP that
+      fourteen surfaces spend at different rates** — `/cart/*` costs 1,
+      `/auth/sign-in` 10, `/auth/password/forgot` 20 — and the sharing is the
+      point: burn the budget guessing order numbers and you cannot also spend
+      it on sign-in. Reproducing that upstream needs a middleware and a
+      path-matched router per surface, and they would be **independent**
+      buckets — a weaker policy than the one being replaced, kept where nobody
+      will find it.
+      *So both, doing different jobs.* Traefik takes the volumetric ceiling —
+      the flood arriving faster than Bun can parse it, which an in-process
+      limiter cannot help with because the request is already accepted before
+      it counts. The API keeps which surface costs what. That is not the "two
+      limiters disagreeing" `limits.ts` warns about; those two do the same job.
+      *The sharpest edge already moved out of memory anyway.* Credential
+      stuffing was the thing a per-instance IP limiter could not see, and #15
+      put that count in Postgres, per account, shared across containers.
+      **Config, not code, and it is yours to apply** — I cannot reach your
+      Traefik. C8 has the file and label forms, plus the trap: behind
+      Cloudflare `ipStrategy.depth: 1` buckets the entire planet together,
+      because the rightmost `X-Forwarded-For` entry is Cloudflare's edge.
 
 - [x] **13. Backups, and one rehearsed restore** — **done as far as this repo
       can take it**: `scripts/backup.sh`, `scripts/restore.sh`,

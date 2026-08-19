@@ -542,8 +542,12 @@ callers — webhooks, cron, curl — send no `Origin` and are unaffected.
 
 *The rate limiter is per-instance and per-IP, and says so.* It is a guard against
 a script hammering `/enquiries`, not a quota system: three containers means three
-times the limit. Set `RATE_LIMIT_PER_MINUTE=0` where a load balancer already does
-this properly, because two limiters disagreeing is worse than one.
+times the limit. **Do not answer that by setting `RATE_LIMIT_PER_MINUTE=0` and
+letting Traefik do it** — Traefik's buckets are per middleware, while this is one
+shared budget per IP with per-surface costs, and the sharing is what makes it
+useful. `docs/setup.md` C8 has the split that works: Traefik for volume, this for
+which surface costs what. Two limiters doing the same job disagree; these do
+different jobs.
 `X-Forwarded-For` is read **only** when `TRUSTED_PROXY_HEADER` names it —
 trusting it unconditionally lets any caller pick their own bucket by forging it.
 
