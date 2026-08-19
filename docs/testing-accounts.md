@@ -11,7 +11,29 @@ Sign-ins for exercising the API by hand — Swagger UI at
 
 ## The accounts
 
-**Password for all four: `DevPassw0rd!`**
+Password, the same for all four:
+
+```
+DevPassw0rd!
+```
+
+Emails:
+
+```
+staff@test.local
+warehouse@test.local
+shopper2@test.local
+staff2@test.local
+```
+
+Or as pairs, to paste straight into a sign-in form:
+
+```
+staff@test.local        DevPassw0rd!
+warehouse@test.local    DevPassw0rd!
+shopper2@test.local     DevPassw0rd!
+staff2@test.local       DevPassw0rd!
+```
 
 | Email | Role | What it is for |
 |---|---|---|
@@ -87,9 +109,15 @@ Three of those are the interesting ones:
 
 | Endpoint | Guard |
 |---|---|
-| `POST /jobs/drain` | `X-Jobs-Secret: local-dev-jobs-secret-0123456789` (`JOBS_SECRET` in `.env`) |
+| `POST /jobs/drain` | `X-Jobs-Secret` header (`JOBS_SECRET` in `.env`) |
 | `POST /webhooks/razorpay` | `X-Razorpay-Signature` — an HMAC over the raw body |
 | `/catalog/*`, `/shipping/quote`, `/health` | None. Public by design |
+
+The jobs secret, for pasting into Swagger or curl:
+
+```
+local-dev-jobs-secret-0123456789
+```
 
 ---
 
