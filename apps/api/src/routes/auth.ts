@@ -5,6 +5,7 @@ import { requireAuth } from "../auth";
 import { sendAuthCode, verifyAuthCode } from "../authmail";
 import { env } from "../env";
 import { jsonError, validationHook } from "../schemas";
+import { serviceClient } from "../supabase";
 
 /**
  * The auth surface.
@@ -17,9 +18,9 @@ import { jsonError, validationHook } from "../schemas";
  * That is now reversed: the browser talks only to this API. The reason
  * the API exists at all -- "one place to rate-limit and audit" -- did
  * not survive an auth path that went around it. A sign-in the browser
- * reaches directly cannot be rate-limited here, cannot be checked
- * against the blocklist, and answers in a second error envelope no
- * client can branch on.
+ * reaches directly cannot be rate-limited here, cannot be counted
+ * towards the per-account lockout below, and answers in a second error
+ * envelope no client can branch on.
  *
  * WHAT THIS IS NOT: a reimplementation of GoTrue. Every handler below
  * forwards to Supabase Auth's own REST API and maps the answer into this
@@ -48,6 +49,10 @@ async function gotrue(
         ...(init.token ? { Authorization: `Bearer ${init.token}` } : {}),
       },
       body: init.body ? JSON.stringify(init.body) : undefined,
+      // GoTrue gets the same deadline as PostgREST. Without it a hung
+      // auth service holds every sign-in open indefinitely -- and the
+      // catch below already knows what to do with the abort.
+      signal: AbortSignal.timeout(env.SUPABASE_TIMEOUT_MS),
     });
   } catch (err) {
     // The auth service being unreachable is our problem, not the caller's.
@@ -153,6 +158,36 @@ const tooMany = () =>
     cause: { code: "rate_limited" },
   });
 
+/**
+ * The per-account half of the sign-in defence.
+ *
+ * The IP limiter in app.ts allows six attempts a minute from one
+ * address, which is the right shape for one machine and the wrong shape
+ * for the attack this endpoint gets: a credential list replayed a few
+ * tries at a time across a thousand addresses, every one of them inside
+ * its own budget. Only the account they share can see that.
+ *
+ * State lives in Postgres rather than in this process -- see
+ * 20260801002800_signin_lockout.sql for why a second container must not
+ * mean a second counter -- and the failure mode is chosen deliberately:
+ * if the check itself errors, the sign-in proceeds. An outage in the
+ * lockout must not become an outage in signing in.
+ */
+async function lockedUntil(email: string): Promise<string | null> {
+  const { data, error } = await serviceClient().rpc("auth_lock_check", {
+    p_email: email,
+  });
+  if (error) return null;
+  return (data as unknown as string | null) ?? null;
+}
+
+const recordFailure = (email: string) =>
+  serviceClient().rpc("auth_record_failure", { p_email: email });
+
+/** Called on a successful sign-in, and after a password is reset. */
+const clearFailures = (email: string) =>
+  serviceClient().rpc("auth_clear_failures", { p_email: email });
+
 const signUp = createRoute({
   method: "post",
   path: "/auth/sign-up",
@@ -199,7 +234,7 @@ const signIn = createRoute({
   tags: ["auth"],
   summary: "Exchange a password for a session",
   description:
-    "A wrong password and an unknown email answer identically, for the same reason every 401 in this service does: the difference is a free way to find out who has an account here.\n\nRate-limited harder than anything else on the service. This is the endpoint a script points a password list at.",
+    "A wrong password and an unknown email answer identically, for the same reason every 401 in this service does: the difference is a free way to find out who has an account here.\n\nRate-limited harder than anything else on the service. This is the endpoint a script points a password list at.\n\nLimited twice over: per IP address, and per email address. Ten failures against one address inside fifteen minutes locks that address for fifteen minutes, whatever addresses the attempts came from -- credential stuffing spreads across IPs and has only the account in common. A successful password reset lifts the lock immediately, which is the way out if somebody else triggered it. A locked address answers 429, identically to an address that has never had an account.",
   request: {
     body: { content: { "application/json": { schema: z.object(credentials) } } },
   },
@@ -450,6 +485,15 @@ export const authRoute = new OpenAPIHono({ defaultHook: validationHook })
     const { email, password } = c.req.valid("json");
     const log = c.get("log");
 
+    // Before GoTrue, not after. A locked address that still reaches the
+    // auth service spends its rate limit, which is shared with everyone
+    // else signing in.
+    const lock = await lockedUntil(email);
+    if (lock) {
+      log?.warn({ until: lock }, "auth.locked_out");
+      throw tooMany();
+    }
+
     const { status, body } = await gotrue("token?grant_type=password", {
       method: "POST",
       body: { email, password },
@@ -459,6 +503,20 @@ export const authRoute = new OpenAPIHono({ defaultHook: validationHook })
       // Which of the two it was goes to the log, never to the caller.
       log?.warn({ status, reason: reasonOf(body) }, "auth.signin_refused");
       if (status === 429) throw tooMany();
+
+      // 400 and 401 are the two answers that mean "those credentials are
+      // wrong". Anything else -- a 404, a 502, GoTrue having a bad
+      // afternoon -- is this system's problem, and counting it would
+      // turn an auth outage into every account locking itself out at the
+      // moment there is already nobody able to sign in.
+      if (status === 400 || status === 401) {
+        // Counted whether or not the address has an account here.
+        // Counting only real ones would make the lockout an enumeration
+        // oracle: ten attempts, and 429-instead-of-401 says who banks here.
+        const locked = await recordFailure(email);
+        if (locked.data) log?.warn({ until: locked.data }, "auth.account_locked");
+      }
+
       throw new HTTPException(401, {
         message: "Email or password is incorrect.",
         cause: { code: "invalid_credentials" },
@@ -472,6 +530,9 @@ export const authRoute = new OpenAPIHono({ defaultHook: validationHook })
         cause: { code: "invalid_credentials" },
       });
     }
+    // The right password ends the run, so a person who eventually
+    // remembers theirs is not carrying nine failures into next week.
+    await clearFailures(email);
     log?.info({ userId: session.user.id }, "auth.signed_in");
     return c.json(session, 200);
   })
@@ -585,6 +646,12 @@ export const authRoute = new OpenAPIHono({ defaultHook: validationHook })
       if (status === 429) throw tooMany();
       throw passwordRejected(body);
     }
+
+    // The way out of a lockout you did not cause. Whoever just proved
+    // control of this mailbox and set a new password is the owner, and
+    // making them wait out somebody else's ten guesses would be the
+    // lockout working against the person it exists for.
+    await clearFailures(email);
 
     log?.info({ userId: session.user.id }, "auth.password_reset");
     return c.json(session, 200);

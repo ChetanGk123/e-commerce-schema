@@ -23,15 +23,28 @@ create table if not exists auth.users (
 alter table auth.users add column if not exists phone text;
 alter table auth.users add column if not exists raw_user_meta_data jsonb;
 
--- Supabase derives this from the request JWT. Here it reads a GUC so
--- tests can impersonate a user with:
---   set local request.jwt.claim.sub = '<uuid>';
+-- Supabase derives this from the request JWT. This mirrors Supabase's own
+-- definition, which reads BOTH shapes, because two callers set two
+-- different GUCs:
+--
+--   request.jwt.claim.sub   what a SQL test sets by hand:
+--                             set local request.jwt.claim.sub = '<uuid>';
+--   request.jwt.claims      what PostgREST v9+ sets, the whole claim set
+--                           as one JSON object
+--
+-- Reading only the first is why `make test-api` first saw every staff
+-- request answered 403: auth.uid() was null under a real PostgREST, so
+-- is_staff() was false and RLS believed nobody was signed in. The SQL
+-- invariants could not have caught that -- they set the GUC themselves.
 create or replace function auth.uid()
 returns uuid
 language sql
 stable
 as $$
-  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub'
+  )::uuid
 $$;
 
 do $$

@@ -1,0 +1,23 @@
+# The build context is the whole monorepo, so what is excluded here is
+# what does not end up in an image layer -- and .env is the line that
+# matters: it holds the service role key.
+**/.env
+**/.env.*
+!**/.env.example
+
+node_modules
+**/node_modules
+.git
+.github
+.turbo
+**/.turbo
+dist
+**/dist
+**/.next
+
+# Not needed to build or run the API.
+docs
+supabase
+scripts
+.vscode
+.claude

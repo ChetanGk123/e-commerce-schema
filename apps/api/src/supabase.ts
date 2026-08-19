@@ -25,18 +25,54 @@ import { env } from "./env";
  * no matter what the select list says. Forwarding a staff token here would
  * quietly widen the storefront to unpublished rows.
  */
+/**
+ * Every call out of this process gets a deadline.
+ *
+ * supabase-js has no timeout of its own -- it hands the request to fetch
+ * and waits, and fetch waits forever. A PostgREST that accepts the
+ * connection and then stops answering (a saturated pool, a lock nobody
+ * releases, a network that black-holes rather than refuses) holds the
+ * Hono request open for as long as the caller is willing to wait, and
+ * holds this process's memory with it. Under load that is how one slow
+ * query becomes an outage: every worker parks on a socket and the
+ * service stops answering things it could have answered.
+ *
+ * The failure it converts to is honest -- errors.ts maps the abort to a
+ * 504 rather than the generic 500, so a caller is told to retry rather
+ * than told nothing.
+ */
+const withDeadline = ((
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> => {
+  const deadline = AbortSignal.timeout(env.SUPABASE_TIMEOUT_MS);
+  return fetch(input, {
+    ...init,
+    // supabase-js's own .abortSignal() has to keep working. Whichever
+    // fires first wins; replacing the caller's signal would silently
+    // disable every cancellation the client asked for.
+    signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+  });
+  // The cast, and why it is not an Object.assign carrying Bun's
+  // `preconnect`: packages/client type-checks this file (it imports
+  // AppType) without @types/bun, so naming a Bun-only property here fails
+  // its build -- the same way Bun.CryptoHasher did in B12. A wrapper that
+  // forwards to fetch is a fetch; the helper it lacks is one nothing calls.
+}) as unknown as typeof fetch;
+
 let anon: SupabaseClient | undefined;
 
 export function anonClient(): SupabaseClient {
   anon ??= createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: { fetch: withDeadline },
   });
   return anon;
 }
 
 export function callerClient(accessToken: string): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    global: { headers: { Authorization: `Bearer ${accessToken}` }, fetch: withDeadline },
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
@@ -58,6 +94,7 @@ let cached: SupabaseClient | undefined;
 export function serviceClient(): SupabaseClient {
   cached ??= createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: { fetch: withDeadline },
   });
   return cached;
 }

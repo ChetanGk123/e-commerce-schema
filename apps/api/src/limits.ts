@@ -13,8 +13,17 @@ import { env } from "./env";
  *
  *   PER INSTANCE. Three API containers means three times the limit. This
  *   is a guard against a script hammering /enquiries, not a quota system.
- *   A real one lives in Redis or in the load balancer, and if you have
- *   the latter, set RATE_LIMIT_PER_MINUTE=0 rather than running both.
+ *
+ *   Do NOT answer that by moving it to Traefik and setting
+ *   RATE_LIMIT_PER_MINUTE=0. Traefik's rateLimit is a token bucket per
+ *   middleware; what this is, is one shared budget per IP that different
+ *   surfaces spend at different rates -- and the sharing is the point.
+ *   Burn it guessing order numbers and you cannot also spend it on
+ *   sign-in. Reproducing that upstream needs a middleware and a router
+ *   per surface, and they would be independent buckets: a weaker policy
+ *   than this one, kept in a place nobody will look. docs/setup.md C8
+ *   has the arrangement that does work -- Traefik for volume, this for
+ *   which surface costs what.
  *
  *   PER IP. Anyone behind the same NAT shares a bucket. The limits below
  *   are set high enough that a shared office connection browsing a shop

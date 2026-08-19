@@ -1,13 +1,22 @@
 import { createMiddleware } from "hono/factory";
+import { routePath } from "hono/route";
 import { pino } from "pino";
 
 import { env } from "./env";
+import { recordRequest } from "./metrics";
 
 export const logger = pino({
   level: env.LOG_LEVEL,
   base: { service: "api" },
   // Human-readable in development, JSON everywhere else so a log shipper can
   // parse it. pino-pretty is a devDependency and is never required in prod.
+  //
+  // This branch is also why the container sets NODE_ENV=production and not
+  // merely as a convention: the transport runs pino-pretty in a worker
+  // thread, and a worker cannot resolve its target out of the single file
+  // `bun build` emits. The bundled process dies at boot with
+  // `DataCloneError: The object can not be cloned`, which names nothing
+  // that would lead you here.
   ...(env.NODE_ENV === "development"
     ? {
         transport: {
@@ -53,8 +62,20 @@ export const requestLogger = createMiddleware(async (c, next) => {
   try {
     await next();
   } finally {
-    const ms = Math.round(performance.now() - start);
+    const elapsed = performance.now() - start;
+    const ms = Math.round(elapsed);
     const status = c.res.status;
+
+    // The registered pattern, not the path: `/orders/:id`, so Prometheus
+    // gets one series per route instead of one per order. Unmatched
+    // requests come back as the catch-all middleware's own `/*`, which
+    // would be a misleading label for a 404, so they are named as what
+    // they are. The scrape itself is left out -- counting the observer
+    // tells you nothing about the service.
+    const matched = routePath(c);
+    if (c.req.path !== "/metrics") {
+      recordRequest(method, matched === "/*" ? "unmatched" : matched, status, elapsed / 1000);
+    }
 
     // Start and finish are separate lines on purpose: a request that hangs or
     // crashes the process still leaves the "-->" behind, so you can see what

@@ -430,16 +430,101 @@ select jobname, schedule, active from cron.job order by jobname;
 **PITR does not exist here.** This database holds GST invoices you are required to retain
 and a `credit_ledger` that is money you owe customers. Nothing is backing it up by default.
 
-At minimum:
+Two scripts in this repo, so that the thing you rehearse is the thing you run:
 
-1. A scheduled `pg_dump` to off-host storage (Dokploy can schedule database backups to S3).
-2. **A restore, actually rehearsed into a scratch database.** An untested backup is not a
-   backup.
-3. If Storage keeps product images on a local volume rather than an S3-compatible backend,
-   that volume needs backing up too — it is not in the `pg_dump`.
+```bash
+scripts/backup.sh  supabase-db-1  /srv/backups        # cron this
+scripts/restore.sh <empty-container> /srv/backups/<stamp>
+```
+
+`backup.sh` writes **two** files, and the first is the one people forget:
+
+| file | why |
+|---|---|
+| `roles.sql` | `pg_dumpall --roles-only`. Roles are cluster-global, so they are **not** in a `pg_dump`. Restore without them and every `to authenticated` policy errors — and `pg_restore` keeps going, leaving you all the data and none of the access control |
+| `database.dump` | `pg_dump -Fc`. Compressed, and `pg_restore` can pull one table out of it at 3am |
+
+`restore.sh` loads the roles first and passes `--exit-on-error`. That flag is doing real
+work: without it a restore missing its roles **exits 0** after skipping the statements it
+could not run.
+
+### Rehearse it
+
+```bash
+make restore-drill
+```
+
+Backs up the seeded database with `backup.sh`, restores it into an empty container with
+`restore.sh`, and fingerprints both — roles, every policy, RLS enabled/forced per table,
+every function signature, every table's row count — then diffs. Any line that differs is
+something the backup did not bring across, named.
+
+It asserts fidelity to the source, not schema correctness; `make test` already does the
+latter, and `01_invariants.sql` loads fixtures so it cannot run against a database that
+has data. The seed is only ~44 rows across 16 tables, so this proves the *procedure*, not
+that a 40GB dump transfers — but the procedure is what fails, and it is what nobody checks.
+
+**Still not covered, and neither script will tell you:** product images. See C5a — on R2
+they are Cloudflare's problem rather than an unbacked Docker volume, but they are still
+not in `dist/backup/`. Role passwords are stripped (`--no-role-passwords`); set them from
+`template.toml` after a real restore or nothing can connect.
 
 For real point-in-time recovery rather than nightly snapshots, run WAL-G or pgBackRest
 against the Postgres container.
+
+### C5a. Product images on Cloudflare R2
+
+The compose file bind-mounts Storage to a local directory, which means product images
+live on one host's disk and are in no backup. R2 is the fix: S3-compatible, and **no
+egress charge**, which is the bill that matters for a file served on every page view.
+
+Set on the `storage` container:
+
+```
+STORAGE_BACKEND=s3
+GLOBAL_S3_BUCKET=product-images
+GLOBAL_S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
+GLOBAL_S3_FORCE_PATH_STYLE=true
+REGION=auto
+AWS_ACCESS_KEY_ID=<R2 API token id>
+AWS_SECRET_ACCESS_KEY=<R2 API token secret>
+```
+
+and on `apps/api`:
+
+```
+STORAGE_BUCKET=product-images
+STORAGE_PUBLIC_URL=https://images.example.com
+```
+
+**`STORAGE_PUBLIC_URL` is the whole point, and it is the step people skip.** It is a
+[custom domain](https://developers.cloudflare.com/r2/buckets/public-buckets/) on the R2
+bucket. With it, a storefront's `<img src>` resolves to Cloudflare's edge and never
+touches your server. Without it the API falls back to
+`/storage/v1/object/public/...`, which works and proxies every byte through your storage
+container — your bandwidth, your CPU, and the one reason to be on R2 thrown away. The
+API builds image URLs from this variable rather than from wherever the upload landed, so
+you can add the domain later without rewriting a single row.
+
+Do **not** use the `r2.dev` development subdomain for this. It is rate-limited and
+Cloudflare says plainly it is not for production.
+
+Three things that will bite, in the order they usually do:
+
+1. **`REGION=auto`** is R2's only region. Clients that validate region strings against
+   AWS's list reject it; Supabase Storage passes it through.
+2. **AWS SDK integrity checksums.** SDK v3 began sending CRC32 trailers
+   (`STREAMING-UNSIGNED-PAYLOAD-TRAILER`) on uploads, which R2 rejected for a period. An
+   upload failing with a 400 about checksums is this, not your credentials.
+3. **imgproxy needs its own S3 configuration** (`IMGPROXY_USE_S3`, the same endpoint and
+   credentials) or it must fetch over HTTPS. Reading files off the local disk stops
+   working the moment the backend changes, and the symptom is transformations failing
+   while plain images still load.
+
+Uploads go through `POST /admin/products/{id}/images`, staff only. The API decides the
+file type by reading the first bytes rather than trusting `Content-Type`, and generates
+the object key itself — an uploaded filename is an attacker's string, and a repeated one
+would silently overwrite another product's photograph.
 
 ### C6. What you lose, and the substitutes
 
@@ -456,6 +541,97 @@ against the Postgres container.
 server-side only — but note that **self-hosted GoTrue commonly signs with HS256 against the
 shared `JWT_SECRET`** rather than asymmetric keys with JWKS. If you verify tokens yourself
 anywhere, check `GOTRUE_JWT_*` in the compose before assuming JWKS.
+
+### C8. Rate limiting at Traefik
+
+The limiter in `apps/api/src/limits.ts` counts requests in process memory, so three API
+containers means three times the limit. The obvious fix — move it to Traefik, set
+`RATE_LIMIT_PER_MINUTE=0` — **is the wrong one**, and it took writing the config to see
+why.
+
+Traefik's `rateLimit` is a token bucket per middleware. The API's limiter is one shared
+budget per IP that different surfaces spend at different rates:
+
+| surface | cost | out of a 60/min budget |
+|---|---|---|
+| `/cart/*` | 1 | 60 a minute |
+| `/stock-alerts`, `/returns` | 4 | 15 a minute |
+| `/checkout`, `/payments/*`, `/reviews`, `/enquiries` | 6 | 10 a minute |
+| `/auth/sign-in`, `/auth/password/change`, `/gift-cards/redeem` | 10 | 6 a minute |
+| `/orders/track` | 12 | 5 a minute |
+| `/auth/sign-up` | 15 | 4 a minute |
+| `/auth/password/forgot`, `/account/erase` | 20 | 3 a minute |
+
+All fourteen draw on the same 60, so those per-minute figures are ceilings reached only
+if a caller spends the whole budget on one surface.
+
+**The sharing is the point.** Burn the budget guessing order numbers and you cannot also
+hammer sign-in with it. To express that in Traefik you would need a middleware and a
+path-matched router per surface — fourteen of them — and they would be fourteen
+*independent* buckets, which is a weaker policy than the one being replaced. It would
+also move business rules into infrastructure config, where the next person will not find
+them.
+
+So run both, doing **different jobs**:
+
+- **Traefik**: volumetric. One coarse ceiling per IP across everything, sized so no honest
+  client ever meets it. This is the guard against a flood arriving faster than Bun can
+  parse it — the one thing an in-process limiter cannot help with, because the request has
+  already been accepted before it counts.
+- **`apps/api`**: which surfaces cost what. Keep `RATE_LIMIT_PER_MINUTE=60`.
+
+That does not contradict `limits.ts`'s warning about two limiters disagreeing. Two
+limiters doing the *same* job disagree; these do different ones.
+
+```yaml
+# Traefik v3 dynamic configuration
+http:
+  middlewares:
+    api-flood:
+      rateLimit:
+        average: 300
+        period: 1m
+        burst: 100
+        sourceCriterion:
+          ipStrategy:
+            depth: 1
+```
+
+or as Docker labels, which is how Dokploy does it:
+
+```
+traefik.http.middlewares.api-flood.ratelimit.average=300
+traefik.http.middlewares.api-flood.ratelimit.period=1m
+traefik.http.middlewares.api-flood.ratelimit.burst=100
+traefik.http.middlewares.api-flood.ratelimit.sourcecriterion.ipstrategy.depth=1
+traefik.http.routers.api.middlewares=api-flood@docker
+```
+
+**Behind Cloudflare, `depth: 1` is wrong.** Traefik counts from the right of
+`X-Forwarded-For`, and the rightmost entry is Cloudflare's edge — so every visitor shares
+one bucket and the first burst locks out the planet. Use the header Cloudflare sets:
+
+```yaml
+        sourceCriterion:
+          requestHeaderName: CF-Connecting-IP
+```
+
+That header is trustworthy **only** if Traefik cannot be reached except through
+Cloudflare. If your origin answers on its public IP, anyone can send whatever
+`CF-Connecting-IP` they like and get a fresh bucket per request. Restrict the origin to
+[Cloudflare's IP ranges](https://www.cloudflare.com/ips/) first.
+
+Set `TRUSTED_PROXY_HEADER` on the API to the same header, or the two limiters will be
+counting different people.
+
+**Traefik's limiter is also per-instance.** One Traefik in front of N API containers is
+the single choke point that makes this work; two Traefik replicas have exactly the
+problem being fixed, and Traefik has no shared backing store for this.
+
+Worth noting what has already moved out of memory: the sign-in lockout
+(`20260801002800_signin_lockout.sql`) counts failures per **account** in Postgres, shared
+across every container. Credential stuffing was the sharpest thing the per-instance
+limiter could not see, and it is no longer the limiter's job.
 
 ---
 

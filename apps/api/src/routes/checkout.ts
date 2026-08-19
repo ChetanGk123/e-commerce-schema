@@ -32,6 +32,11 @@ const CheckoutResponse = z
     orderId: z.string().uuid(),
     orderNumber: z.string(),
     status: z.string(),
+    /**
+     * The payment the caller has to settle. When store credit covered the
+     * whole order that is the credit payment itself, already captured --
+     * there is no gateway step, and `status` is `paid`.
+     */
     paymentId: z.string().uuid(),
     paymentMethod: z.enum(["razorpay", "cod"]),
     currency: z.string(),
@@ -40,12 +45,20 @@ const CheckoutResponse = z
     shippingTotal: z.number(),
     taxTotal: z.number(),
     grandTotal: z.number(),
+    /**
+     * How much store credit was spent. Less than requested when the
+     * balance was smaller, and the difference is what the gateway is
+     * owed -- `grandTotal` still states the order's full value, because
+     * credit is a way of paying it and not a discount on it.
+     */
+    creditApplied: z.number(),
     /** When the stock hold lapses if payment has not completed. */
     reservedUntil: z.string(),
   })
   .openapi("CheckoutResponse");
 
 interface CheckoutRow {
+  credit_applied: number | null;
   order_id: string;
   order_number: string;
   status: string;
@@ -142,6 +155,10 @@ export const checkoutRoute = new OpenAPIHono({
     p_payment_method: body.payment_method,
     p_coupon_code: body.coupon_code ?? null,
     p_cart_id: cartId ?? null,
+    // Opt-in. A customer with a balance may well be saving it, and
+    // spending it silently is not a decision this endpoint gets to make.
+    // Ignored for guests, who have no ledger to spend from.
+    p_use_credit: body.use_credit ?? false,
   });
   throwOnDbError(error);
 
@@ -165,6 +182,7 @@ export const checkoutRoute = new OpenAPIHono({
       orderNumber: row.order_number,
       status: row.status,
       paymentId: row.payment_id,
+      creditApplied: Number(row.credit_applied ?? 0),
       paymentMethod: row.payment_method,
       currency: row.currency,
       subtotal: Number(row.subtotal),

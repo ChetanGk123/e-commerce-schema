@@ -140,6 +140,66 @@ const listShipments = createRoute({
   },
 });
 
+/**
+ * Everything after dispatch, which until now did not exist.
+ *
+ * Six of the seven values shipments.status allows were unreachable:
+ * admin_ship_order() wrote 'label_created' and nothing could move one
+ * afterwards, so delivered_at stayed null forever and orders.status
+ * could never become 'delivered'. Every order this store fulfilled
+ * stayed "shipped".
+ */
+const updateShipment = createRoute({
+  method: "patch",
+  path: "/admin/shipments/{id}",
+  tags: ["admin", "fulfilment"],
+  summary: "Advance a shipment",
+  description:
+    "Moves a parcel through `picked_up`, `in_transit`, `out_for_delivery`, `delivered`, or ends it at `rto` or `lost`.\n\n**The order follows the last parcel, not this one.** An order can be fulfilled in parts, so marking one shipment delivered while another is in transit does not tell the customer their order arrived -- the order becomes `delivered` only when nothing on it is still outstanding. The response says what the order's status is now.\n\n`rto` and `lost` deliberately leave the order alone: a returned or lost parcel needs a person to choose between a refund, a reship and a carrier claim.\n\nRepeating a status already set is a no-op rather than an error, so a courier webhook redelivering `delivered` is harmless.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            status: z.enum([
+              "label_created",
+              "picked_up",
+              "in_transit",
+              "out_for_delivery",
+              "delivered",
+              "rto",
+              "lost",
+            ]),
+            /** Defaults to now. Useful when the courier's timestamp is authoritative. */
+            at: z.string().datetime().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Updated, with the order's resulting status",
+      content: {
+        "application/json": {
+          schema: z.object({
+            shipment: Shipment,
+            orderStatus: z.string(),
+          }),
+        },
+      },
+    },
+    400: jsonError("Unknown status"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    404: jsonError("No such shipment"),
+    409: jsonError("The order is cancelled or refunded"),
+  },
+});
+
 export const fulfilmentRoute = new OpenAPIHono({ defaultHook: validationHook })
   .openapi(ship, async (c) => {
     const { id } = c.req.valid("param");
@@ -182,6 +242,33 @@ export const fulfilmentRoute = new OpenAPIHono({ defaultHook: validationHook })
 
     return c.json(
       { items: ((data ?? []) as unknown as ShipmentRow[]).map(shape) },
+      200,
+    );
+  })
+
+  .openapi(updateShipment, async (c) => {
+    const { id } = c.req.valid("param");
+    const { status, at } = c.req.valid("json");
+    const db = c.get("caller").db;
+
+    // The RPC, not two UPDATEs: it touches the shipment, the order and
+    // the timeline, and a half-moved order is worse than an unmoved one.
+    const { data: orderStatus, error } = await db.rpc("admin_update_shipment", {
+      p_shipment_id: id,
+      p_status: status,
+      p_at: at ?? null,
+    });
+    throwOnDbError(error);
+
+    const after = await db.from("shipments").select(SHIPMENT_SELECT).eq("id", id).single();
+    throwOnDbError(after.error);
+
+    c.get("log")?.info({ id, status, orderStatus }, "fulfilment.shipment_updated");
+    return c.json(
+      {
+        shipment: shape(after.data as unknown as ShipmentRow),
+        orderStatus: orderStatus as unknown as string,
+      },
       200,
     );
   });

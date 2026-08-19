@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { publishOps } from "./metrics";
 import { logger as log } from "./logger";
 import { type Message, mailerConfigured, send } from "./mailer";
 import { type RazorpayEvent, processEvent } from "./routes/webhooks";
@@ -243,10 +244,184 @@ async function runSweepers(): Promise<void> {
   for (const fn of [
     "release_expired_reservations",
     "sweep_idempotency_keys",
+    // Not housekeeping: auth_attempts grows with an attacker's word
+    // list, so under a spray this is what keeps the defence from
+    // becoming the resource exhaustion.
+    "sweep_auth_attempts",
   ]) {
     const { data, error } = await db.rpc(fn);
     if (error) log.error({ err: error.message, fn }, "jobs.sweeper_failed");
     else if ((data as unknown as number) > 0) log.info({ fn, rows: data }, "jobs.swept");
+  }
+}
+
+/**
+ * The two silent failures, said out loud.
+ *
+ * /admin/outbox and /admin/webhooks compute exactly what is wrong and
+ * both wait to be asked. A mail queue that stopped draining and a
+ * payment callback that could not be applied are the failures here that
+ * are silent, unbounded and expensive -- the first means every order
+ * confirmation since is unsent, the second means a customer paid and
+ * this database still calls their order pending.
+ *
+ * So the tick checks them and tells somebody. raise_ops_alert() writes
+ * one notification per active owner and admin, with a cooldown, so a
+ * condition that persists does not become the outage itself.
+ *
+ * These also log at error level with stable messages -- ops.outbox_stalled
+ * and ops.webhooks_exhausted -- which is the hook for a log shipper that
+ * can actually page someone. The notification is where staff already
+ * look; the log line is where an alert rule belongs.
+ */
+async function checkOps(): Promise<void> {
+  const db = serviceClient();
+
+  // Collected as we go and published once at the end, so GET /metrics
+  // costs a scraper nothing: these are the same numbers the alerts below
+  // are decided from, which is the point -- a dashboard disagreeing with
+  // the alert that woke you is worse than no dashboard.
+  const snapshot = {
+    outbox: {} as Record<string, number>,
+    outboxStalled: 0,
+    webhooksUnprocessed: 0,
+    webhooksExhausted: 0,
+    authLockouts: 0,
+  };
+
+  const outbox = await db.rpc("outbox_health");
+  if (outbox.error) {
+    log.error({ err: outbox.error.message }, "jobs.ops_check_failed");
+  } else {
+    const h = outbox.data as {
+      by_status: Record<string, number>;
+      oldest_queued_at: string | null;
+      stalled_sending: number;
+    };
+    const queued = h.by_status?.queued ?? 0;
+    snapshot.outbox = h.by_status ?? {};
+    snapshot.outboxStalled = h.stalled_sending;
+
+    if (h.stalled_sending > 0) {
+      log.error({ stalled: h.stalled_sending }, "ops.outbox_stalled");
+      await alert(
+        db,
+        "ops_outbox_stalled",
+        "Mail is stuck part-sent",
+        `${h.stalled_sending} message(s) have been claimed by a drainer that never finished. They are rescued automatically after ten minutes; if this keeps recurring the process is dying mid-send.`,
+        { stalled: h.stalled_sending },
+      );
+    } else if (queued > 500 && mailerConfigured()) {
+      log.error({ queued }, "ops.outbox_backlog");
+      await alert(
+        db,
+        "ops_outbox_backlog",
+        "The mail queue is not draining",
+        `${queued} messages are waiting. Order confirmations are among them.`,
+        { queued, oldest: h.oldest_queued_at },
+      );
+    } else if (queued > 0 && !mailerConfigured()) {
+      // Not an error: a store whose mail is not wired up yet is a
+      // deliberate state. It is worth saying once, because the symptom
+      // -- no confirmation emails -- looks like a bug from outside.
+      log.warn({ queued }, "ops.mailer_absent");
+      await alert(
+        db,
+        "ops_mailer_absent",
+        "No mail provider is configured",
+        `${queued} message(s) are queued and nothing will send them until MAIL_PROVIDER and its credentials are set.`,
+        { queued },
+      );
+    }
+  }
+
+  // Deliveries that ran out of retries. For a payment event that means
+  // the gateway took money this database never recorded.
+  const exhausted = await db
+    .from("webhook_events")
+    .select("id", { count: "exact", head: true })
+    .is("processed_at", null)
+    .gte("attempts", REDRIVE_MAX_ATTEMPTS);
+
+  if (exhausted.error) {
+    log.error({ err: exhausted.error.message }, "jobs.ops_check_failed");
+    return;
+  }
+  const stuck = exhausted.count ?? 0;
+  snapshot.webhooksExhausted = stuck;
+  if (stuck > 0) {
+    log.error({ stuck }, "ops.webhooks_exhausted");
+    await alert(
+      db,
+      "ops_webhooks_exhausted",
+      "A payment callback could not be applied",
+      `${stuck} delivery(ies) gave up after ${REDRIVE_MAX_ATTEMPTS} attempts. If any is a capture, a customer has been charged for an order still marked pending. See GET /admin/webhooks.`,
+      { stuck },
+    );
+  }
+
+  // Several accounts locked at once is not several people forgetting
+  // their passwords. The lockout stops the attack; this is the half that
+  // makes it visible, which is what the audit actually complained about.
+  const locked = await db
+    .from("auth_attempts")
+    .select("email", { count: "exact", head: true })
+    .gt("locked_until", new Date().toISOString());
+
+  if (locked.error) {
+    log.error({ err: locked.error.message }, "jobs.ops_check_failed");
+    return;
+  }
+  const accounts = locked.count ?? 0;
+  snapshot.authLockouts = accounts;
+  if (accounts >= STUFFING_ACCOUNTS) {
+    log.error({ accounts }, "ops.credential_stuffing");
+    await alert(
+      db,
+      "ops_credential_stuffing",
+      "Several accounts are locked out at once",
+      `${accounts} accounts hit the sign-in lockout. One person forgets their password; this many at once is a credential list being replayed. The accounts are in auth_attempts. Nothing is breached -- the lockout held -- but any customer among them cannot sign in for fifteen minutes and may call about it.`,
+      { accounts },
+    );
+  }
+
+  // Only on the way out, and only if every query above succeeded. A
+  // partial snapshot would publish real outbox numbers next to a zero
+  // for a webhook count that failed to load, and a zero on
+  // ecom_webhooks_exhausted is the one reading nobody double-checks.
+  // Skipping it instead leaves the last good values in place with
+  // ecom_ops_snapshot_age_seconds climbing, which says what happened.
+  publishOps(snapshot);
+}
+
+/**
+ * How many simultaneous lockouts stop looking like a bad morning.
+ *
+ * Low on purpose. The cost of being wrong is one notification; the cost
+ * of setting it where only an obvious attack trips it is finding out
+ * from a customer.
+ */
+const STUFFING_ACCOUNTS = 5;
+
+async function alert(
+  db: ReturnType<typeof serviceClient>,
+  kind: string,
+  title: string,
+  body: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const { data: told, error } = await db.rpc("raise_ops_alert", {
+    p_kind: kind,
+    p_title: title,
+    p_body: body,
+    p_data: data,
+  });
+  if (error) {
+    log.error({ err: error.message, kind }, "jobs.alert_failed");
+    return;
+  }
+  if ((told as unknown as number) > 0) {
+    log.warn({ kind, recipients: told }, "ops.alert_raised");
   }
 }
 
@@ -277,6 +452,8 @@ export async function startJobs(): Promise<void> {
       await drainOutbox();
       await redriveWebhooks();
       if (!cronOwns) await runSweepers();
+      // Last, so it reports on the state the pass above just left.
+      await checkOps();
     } catch (err) {
       // A throwing tick must not kill the interval, or the outbox stops
       // draining and nothing says why.

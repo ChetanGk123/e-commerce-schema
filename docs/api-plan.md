@@ -542,10 +542,22 @@ callers — webhooks, cron, curl — send no `Origin` and are unaffected.
 
 *The rate limiter is per-instance and per-IP, and says so.* It is a guard against
 a script hammering `/enquiries`, not a quota system: three containers means three
-times the limit. Set `RATE_LIMIT_PER_MINUTE=0` where a load balancer already does
-this properly, because two limiters disagreeing is worse than one.
+times the limit. **Do not answer that by setting `RATE_LIMIT_PER_MINUTE=0` and
+letting Traefik do it** — Traefik's buckets are per middleware, while this is one
+shared budget per IP with per-surface costs, and the sharing is what makes it
+useful. `docs/setup.md` C8 has the split that works: Traefik for volume, this for
+which surface costs what. Two limiters doing the same job disagree; these do
+different jobs.
 `X-Forwarded-For` is read **only** when `TRUSTED_PROXY_HEADER` names it —
 trusting it unconditionally lets any caller pick their own bucket by forging it.
+
+*Sign-in is limited twice, and the second one is not in this process.* Per-IP
+stops one machine; it cannot see a credential list replayed a few tries at a
+time across a thousand addresses, every one inside its own budget. Ten failures
+against one email address in fifteen minutes locks that address for fifteen —
+counted in Postgres (`auth_attempts`), because two containers must not mean two
+counters. See `20260801002800_signin_lockout.sql` for the tradeoffs, including
+the one it costs you.
 
 *The idempotency middleware is not a lock, and checkout keeps its own.* Two
 simultaneous requests with one key both proceed; the second gets a 409 only
@@ -569,8 +581,10 @@ types; both hashers now use `node:crypto`.
 against `hc`" cannot be verified. `packages/client` typechecks, which is the same
 code path.
 
-**Still open** (flagged in B8, in no phase's checklist): checkout cannot *spend*
-store credit. `credit_ledger` has the `order_payment` reason waiting for it.
+**Was still open, now closed**: checkout can spend store credit
+(`20260801002500_credit_at_checkout.sql`). `credit_ledger.order_payment` has a
+caller, the debit happens in the checkout transaction under a per-customer lock,
+and credit covering the whole order marks it paid without a gateway.
 
 ### B13 — Realtime · Low · *scope-guarded*
 
@@ -692,6 +706,7 @@ than guessing at.
 - [x] `POST /auth/sign-up` · `sign-in` · `refresh` · `sign-out`
 - [x] `POST /auth/password/forgot` · `password/change`
 - [x] Rate limits: sign-in 10, sign-up 15, reset mail 20, password change 10
+- [x] Per-account sign-in lockout: 10 failures / 15 min locks the address for 15 min, across every IP; a completed password reset lifts it
 - [x] **Validate**: a wrong password and an unknown email answer identically; the issued token works on `/orders`; sign-out kills the refresh token; a password change invalidates the old password
 
 **The decision that changed.** B0 had the browser talk to Supabase Auth

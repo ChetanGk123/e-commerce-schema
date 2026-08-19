@@ -119,6 +119,57 @@ describe("browsable docs", () => {
   });
 });
 
+describe("DOCS_PUBLIC=false", () => {
+  /**
+   * In a subprocess, because env.ts validates at import time and bun
+   * shares one module registry across every test file -- by the time
+   * this runs, app.ts has already been imported with the flag on.
+   * Setting process.env here would prove nothing.
+   *
+   * Worth the fifteen lines: the untested direction is the one somebody
+   * relies on. A gate that silently fails open leaves a deployment
+   * believing its route map is private.
+   */
+  const run = async (): Promise<Record<string, number>> => {
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        `const { app } = await import("${import.meta.dir}/../src/app.ts");
+         const out = {};
+         for (const p of ["/docs", "/openapi.json", "/catalog/products?limit=1"]) {
+           out[p] = (await app.request(p)).status;
+         }
+         console.log(JSON.stringify(out));`,
+      ],
+      {
+        env: { ...process.env, DOCS_PUBLIC: "false", LOG_LEVEL: "fatal" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const text = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) {
+      throw new Error(await new Response(proc.stderr).text());
+    }
+    return JSON.parse(text.trim().split("\n").pop()!) as Record<string, number>;
+  };
+
+  // Thirty seconds, not bun's default five. The subprocess boots a second
+  // Bun and imports all 350 modules of the app; that is ~1s warm here and
+  // was over five on a cold CI runner, which is a timeout reported as a
+  // failing assertion about DOCS_PUBLIC.
+  test("both documents are gone, and nothing else is", async () => {
+    const status = await run();
+    expect(status["/docs"]).toBe(404);
+    expect(status["/openapi.json"]).toBe(404);
+    // 404 rather than 401: a 401 confirms there is something there, which
+    // is the one fact whoever asked for the route map was after. And the
+    // service still serves -- hiding the map is not turning the API off.
+    expect(status["/catalog/products?limit=1"]).not.toBe(404);
+  }, 30_000);
+});
+
 describe("B4 admin catalog is behind auth", () => {
   test.each([
     ["/admin/products"],
@@ -142,10 +193,111 @@ describe("B4 admin catalog is behind auth", () => {
   });
 
   test("the storefront needs no token at all", async () => {
-    // It must not 401: the catalog is public, and a storefront that requires
-    // sign-in to browse is not a storefront.
-    const res = await app.request("/catalog/products?limit=1");
-    expect(res.status).not.toBe(401);
-    expect(res.status).not.toBe(403);
+    // The catalog is public, and a storefront that requires sign-in to
+    // browse is not a storefront.
+    //
+    // Asserted from the document rather than by calling the route. The
+    // call reached a real database -- the only test in this suite that
+    // did -- so it passed or failed on whether a stack happened to be
+    // running, and against an unreachable one it outlived bun's default
+    // timeout rather than failing on the thing it was checking.
+    const paths = (await doc()).paths as Record<
+      string,
+      Record<string, { security?: unknown[]; responses: Record<string, unknown> }>
+    >;
+    const get = paths["/catalog/products"]?.get;
+    expect(get).toBeDefined();
+    expect(get?.security).toBeUndefined();
+    expect(get?.responses["401"]).toBeUndefined();
+    expect(get?.responses["403"]).toBeUndefined();
+  });
+});
+
+describe("caching", () => {
+  /**
+   * The 200-with-an-ETag path needs real rows, so it lives in the seam
+   * suite. What can be proved here is the half that matters more: that
+   * nothing outside the catalog is cacheable, and that a catalog request
+   * which failed does not get the catalog's header by association.
+   */
+  test.each([
+    ["/health"],
+    ["/me"],
+    ["/openapi.json"],
+    ["/orders/track?orderNumber=X&email=a@b.c"],
+  ])("%s is no-store", async (path) => {
+    const res = await app.request(path);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("a rejected catalog request is not cached", async () => {
+    // Sixty seconds of a cached 400 would outlive the typo that caused it.
+    const res = await app.request("/catalog/products?limit=500");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("etag")).toBeNull();
+  });
+});
+
+describe("product images", () => {
+  test("the type comes from the bytes, not the header", async () => {
+    const { sniffImageType } = await import("../src/storage");
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(sniffImageType(png)).toEqual({ ext: "png", mime: "image/png" });
+    expect(sniffImageType(jpg)).toEqual({ ext: "jpg", mime: "image/jpeg" });
+
+    // "<!DOCTYPE html>" -- the one that matters. Announced as image/png
+    // and served from a domain a browser trusts, this is stored XSS.
+    const html = new TextEncoder().encode("<!DOCTYPE html><script>alert(1)</script>");
+    expect(sniffImageType(html)).toBeNull();
+
+    // Too short to identify is not an image either.
+    expect(sniffImageType(new Uint8Array([0xff, 0xd8, 0xff]))).toBeNull();
+  });
+
+  test("HEIC is refused even though it shares AVIF's box layout", async () => {
+    const { sniffImageType } = await import("../src/storage");
+    const box = (brand: string) =>
+      new Uint8Array([0, 0, 0, 0x18, ...new TextEncoder().encode("ftyp" + brand)]);
+    expect(sniffImageType(box("avif"))).toEqual({ ext: "avif", mime: "image/avif" });
+    // A phone's photo, which nothing on the storefront can display. This
+    // is why the brand is checked and not just `ftyp`.
+    expect(sniffImageType(box("heic"))).toBeNull();
+  });
+
+  test("a URL this service did not write yields no object to delete", async () => {
+    const { pathFromUrl } = await import("../src/storage");
+    // An image added by hand in psql, or one left on the old host. The
+    // row should still go; guessing at a key to delete should not.
+    expect(pathFromUrl("https://cdn.example.com/somebody-elses/photo.jpg")).toBeNull();
+  });
+
+  test("the upload route is declared, and says 415 and 503", async () => {
+    const paths = (await doc()).paths as Record<
+      string,
+      Record<string, { responses: Record<string, unknown>; security?: unknown[] }>
+    >;
+    const post = paths["/admin/products/{id}/images"]?.post;
+    expect(post).toBeDefined();
+    expect(post?.security).toBeDefined();
+    // 415 is the sniffing; 503 is "no bucket configured", which is a
+    // deployment that has not been finished rather than a bad request.
+    expect(post?.responses["415"]).toBeDefined();
+    expect(post?.responses["503"]).toBeDefined();
+    expect(paths["/admin/images/{id}"]?.delete?.responses["204"]).toBeDefined();
+  });
+
+  test("nobody uploads to the catalog without a staff token", async () => {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array([0xff, 0xd8, 0xff])]), "x.jpg");
+    const res = await app.request(
+      "/admin/products/00000000-0000-4000-8000-000000000000/images",
+      { method: "POST", body: form },
+    );
+    // Auth answers before storage does. Worth pinning: an upload route
+    // that checked its bucket first would tell a stranger whether this
+    // deployment has one, and would spend a multipart parse doing it.
+    expect(res.status).toBe(401);
   });
 });

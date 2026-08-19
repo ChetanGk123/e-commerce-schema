@@ -10,6 +10,7 @@
 #   make verify-bundle apply that single file to a throwaway Postgres and test it
 #   make types         regenerate TypeScript types from a live database
 #   make lint          look for common production mistakes
+#   make restore-drill back the seeded database up and restore it into an empty one
 #
 # verify/test never touch Supabase or production. They run against a
 # container that is destroyed and rebuilt on every invocation, which
@@ -18,21 +19,43 @@
 
 CONTAINER  := ecomm-verify
 PGIMAGE    := postgres:16-alpine
-PGPORT     := 55432
+# Both published ports sit BELOW the ephemeral range (Linux 32768-60999,
+# macOS 49152-65535). 55432 and 55433 were inside it, and on a CI runner
+# an outbound connection had already taken 55432 -- `docker run` then dies
+# with "address already in use" before a single migration runs. Nothing
+# reaches Postgres over this port (every psql call is a docker exec); it
+# is published so a human can attach a client, and moving it costs
+# nothing.
+PGPORT     := 15432
+# The API integration stack: PostgREST in front of the same container, so
+# apps/api can be exercised over HTTP exactly as it runs in production.
+NETWORK    := ecomm-test
+PGRST      := ecomm-postgrest
+PGRSTIMAGE := postgrest/postgrest:v12.2.3
+PGRSTPORT  := 15433
+# Shared by PostgREST and apps/api, as GOTRUE_JWT_SECRET/PGRST_JWT_SECRET
+# are on a real deployment. Throwaway: this stack is destroyed each run.
+JWTSECRET  := integration-only-secret-at-least-32-characters-long
+# The drill restores into its own container. Never into $(CONTAINER):
+# restoring over the source is a test that passes when the backup is
+# empty.
+RESTORE    := ecomm-restore
+RPSQL      := docker exec -i $(RESTORE) psql -U postgres -v ON_ERROR_STOP=1 -q
 PSQL       := docker exec -i $(CONTAINER) psql -U postgres -v ON_ERROR_STOP=1 -q
 MIGRATIONS := $(sort $(wildcard supabase/migrations/*.sql))
 
-.PHONY: help verify test seed psql down types lint bundle verify-bundle
+.PHONY: help verify test seed psql down types lint bundle verify-bundle stack test-api restore-drill
 
 help:
 	@grep -E '^#   make' Makefile | sed 's/^#   /  /'
 
 down:
-	@docker rm -f $(CONTAINER) >/dev/null 2>&1 || true
+	@docker rm -f $(CONTAINER) $(PGRST) $(RESTORE) >/dev/null 2>&1 || true
 
 verify: down
 	@echo "==> starting $(PGIMAGE)"
-	@docker run -d --name $(CONTAINER) -e POSTGRES_PASSWORD=pw \
+	@docker network create $(NETWORK) >/dev/null 2>&1 || true
+	@docker run -d --name $(CONTAINER) --network $(NETWORK) -e POSTGRES_PASSWORD=pw \
 		-p $(PGPORT):5432 $(PGIMAGE) >/dev/null
 	@for i in $$(seq 1 60); do \
 		docker exec $(CONTAINER) pg_isready -U postgres >/dev/null 2>&1 && break; \
@@ -61,6 +84,88 @@ seed: verify
 	@echo "==> seeding demo data"
 	@$(PSQL) < supabase/seed.sql
 	@echo "==> seeded"
+
+# ------------------------------------------------------------
+# The API integration stack.
+#
+# `bun test` in apps/api never reaches a database, and the SQL
+# invariants never reach the API. Everything between the two -- that
+# checkout()'s parameter names match what the route sends, that RLS
+# permits the route's select list, that a renamed RPC breaks something
+# -- was untested, and that seam is where this architecture put all of
+# its logic.
+#
+# PostgREST is the whole difference. GoTrue is not needed: apps/api
+# verifies JWTs itself against the shared secret, so the harness mints
+# its own. Only /auth/* proxies to GoTrue, and those routes are not
+# what this is for.
+# ------------------------------------------------------------
+stack: seed
+	@echo "==> starting $(PGRSTIMAGE)"
+	@docker rm -f $(PGRST) >/dev/null 2>&1 || true
+	@docker run -d --name $(PGRST) --network $(NETWORK) \
+		-e PGRST_DB_URI="postgres://postgres:pw@$(CONTAINER):5432/postgres" \
+		-e PGRST_DB_SCHEMAS=public \
+		-e PGRST_DB_ANON_ROLE=anon \
+		-e PGRST_JWT_SECRET="$(JWTSECRET)" \
+		-e PGRST_DB_POOL=4 \
+		-p $(PGRSTPORT):3000 $(PGRSTIMAGE) >/dev/null
+	@for i in $$(seq 1 60); do \
+		curl -sf http://localhost:$(PGRSTPORT)/ >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@echo "==> PostgREST on http://localhost:$(PGRSTPORT) (schema + seed loaded)"
+
+test-api: stack
+	@echo "==> running apps/api integration tests against the stack"
+	@cd apps/api && \
+		INTEGRATION_PGRST_URL=http://localhost:$(PGRSTPORT) \
+		INTEGRATION_JWT_SECRET="$(JWTSECRET)" \
+		bun test test/integration/
+
+# ------------------------------------------------------------
+# The restore drill
+#
+# api-plan calls backups the top risk and setup.md C5 says to rehearse
+# the restore. Neither of those makes anything happen, which is what the
+# production-readiness entry for #13 actually complained about: nothing
+# in this repo fails if it is skipped. This does.
+#
+# It runs the same two scripts an operator runs against supabase-db-1.
+# Rehearsing a different procedure than the one you run is rehearsing
+# nothing.
+#
+# The restored copy gets NO shim and NO migrations -- if `anon`,
+# `authenticated`, the auth schema or a single RLS policy failed to come
+# across, the invariants say so. That is the assertion: not "pg_restore
+# exited 0", but "the restored database still enforces everything the
+# original did".
+# ------------------------------------------------------------
+restore-drill: seed
+	@bash scripts/backup.sh $(CONTAINER) dist/backup > dist/backup/.last
+	@echo "==> starting an empty $(PGIMAGE) to restore into"
+	@docker rm -f $(RESTORE) >/dev/null 2>&1 || true
+	@docker run -d --name $(RESTORE) --network $(NETWORK) -e POSTGRES_PASSWORD=pw \
+		$(PGIMAGE) >/dev/null
+	@for i in $$(seq 1 60); do \
+		docker exec $(RESTORE) pg_isready -U postgres >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@bash scripts/restore.sh $(RESTORE) "$$(cat dist/backup/.last)"
+	@echo "==> fingerprinting both databases"
+	@$(PSQL)  -tA < supabase/tests/02_fingerprint.sql > dist/backup/.source
+	@$(RPSQL) -tA < supabase/tests/02_fingerprint.sql > dist/backup/.restored
+	@printf '==> source:   %s roles, %s policies, %s functions, %s tables\n' \
+		$$(grep -c '^role:'   dist/backup/.source) $$(grep -c '^policy:' dist/backup/.source) \
+		$$(grep -c '^func:'   dist/backup/.source) $$(grep -c '^table:'  dist/backup/.source)
+	@printf '==> restored: %s roles, %s policies, %s functions, %s tables\n' \
+		$$(grep -c '^role:'   dist/backup/.restored) $$(grep -c '^policy:' dist/backup/.restored) \
+		$$(grep -c '^func:'   dist/backup/.restored) $$(grep -c '^table:'  dist/backup/.restored)
+	@diff dist/backup/.source dist/backup/.restored > dist/backup/.diff 2>&1 \
+		&& { echo "==> the restored database is identical to the one backed up"; \
+		     docker rm -f $(RESTORE) >/dev/null 2>&1 || true; } \
+		|| { echo "==> RESTORE IS NOT A BACKUP -- < missing from the restore, > extra:"; \
+		     sed 's/^/    /' dist/backup/.diff; exit 1; }
 
 psql:
 	@docker exec -it $(CONTAINER) psql -U postgres
