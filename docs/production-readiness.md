@@ -38,7 +38,7 @@ that were never built, and the seam that nothing tests.**
 | ~~8~~ | ~~No graceful shutdown~~ | **done** |
 | ~~9~~ | ~~No readiness probe~~ | **done** |
 | ~~17~~ | ~~No integration tests~~ | **done** |
-| 1 | Catalog writes — **products and variants done**; options, images, categories still SQL | |
+| 1 | Catalog writes — products, variants **and options** done; images, categories, collections still SQL | |
 | ~~2–4~~ | ~~No discount, settings or shipping writes~~ | **done** |
 | ~~14~~ | ~~RLS ignores `staff_users.role`~~ | **done**, except `cost_price` |
 | ~~6~~ | ~~Nothing marks a shipment delivered~~ | **done** |
@@ -69,9 +69,28 @@ that were never built, and the seam that nothing tests.**
       service key. Also that a draft is invisible until published, that
       repricing writes `price_history` by trigger, and that a duplicate slug
       is a 409 rather than a 500 quoting the index.
-      *Still open:* options and option values, product images (needs the
-      Storage decision, `setup.md` C5), categories, collections, product
-      relations, and delete/archive of a product.
+      *Options too, since.* `POST /admin/products/{id}/options` creates an
+      option with its values in one call, and `PUT /admin/variants/{id}/options`
+      sets which combination a variant is. This is what README.md leads with —
+      "Amazon / Apple-style configurations" — and none of it was reachable:
+      every product this API created was a simple one with a single
+      unconfigured variant.
+      *Both batch their inserts, and must.* `refresh_signature()` is a
+      statement-level trigger over a transition table, so one statement
+      computes `options_signature` once and the unique index on
+      `(product_id, options_signature)` rejects a duplicate combination with
+      no application cooperation. Row-at-a-time inserts can produce an
+      intermediate signature that collides with another variant's final one —
+      the schema warns about it in a comment, and these are the routes that
+      comment was written for.
+      *Two refusals with no TypeScript behind them, both tested:* a value from
+      another product cannot be attached at all (the composite FKs must both
+      resolve to the same `product_id` — 422 `cross_product_option`, a rule
+      `errors.ts` already carried before anything could provoke it), and two
+      variants cannot claim the same combination.
+      *Still open:* product images (needs the Storage decision, `setup.md` C5),
+      categories, collections, product relations, and delete/archive of a
+      product.
 
 - [x] **2. No discount or coupon management.** — **done**.
       `POST`/`GET` `/admin/discounts`, `PATCH /admin/discounts/{id}`, reusing

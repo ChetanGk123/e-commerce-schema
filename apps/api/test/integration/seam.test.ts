@@ -832,3 +832,158 @@ describe.skipIf(!up)("staff roles are enforced by the database, not the UI", () 
     }
   });
 });
+
+/**
+ * Variant configurations -- the thing README.md leads with and nothing
+ * could reach. Every product created through this API was a simple one
+ * with a single unconfigured variant until now.
+ *
+ * Two of these assert refusals that are structural rather than
+ * validated: the composite foreign keys make cross-product
+ * contamination impossible, and the unique index on
+ * (product_id, options_signature) makes a duplicate combination
+ * impossible. Neither has a line of TypeScript behind it, which is
+ * exactly why they belong here.
+ */
+describe.skipIf(!up)("products can be configured", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  let staffAuth: Record<string, string>;
+  let productId: string;
+  let otherProductId: string;
+  let colourValues: { id: string; value: string }[];
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values ('${STAFF}', 'staff@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do update set role = 'owner', is_active = true;
+    `);
+    staffAuth = { Authorization: `Bearer ${await mintToken("authenticated", STAFF)}` };
+  });
+
+  const send = (method: string, path: string, body?: unknown) =>
+    app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json", ...staffAuth },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  const newProduct = async (slug: string) => {
+    const res = await send("POST", "/admin/products", { name: slug, slug });
+    expect(res.status).toBe(201);
+    return ((await res.json()) as { id: string }).id;
+  };
+
+  const newVariant = async (product: string, sku: string) => {
+    const res = await send("POST", `/admin/products/${product}/variants`, { sku, price: 999 });
+    expect(res.status).toBe(201);
+    return ((await res.json()) as { id: string }).id;
+  };
+
+  test("an option arrives with its values in one call", async () => {
+    productId = await newProduct(`configurable-${crypto.randomUUID().slice(0, 8)}`);
+    const res = await send("POST", `/admin/products/${productId}/options`, {
+      name: "Colour",
+      values: ["Midnight", "Starlight"],
+    });
+    expect(res.status).toBe(201);
+
+    const body = (await res.json()) as { values: { id: string; value: string }[] };
+    colourValues = body.values;
+    expect(colourValues).toHaveLength(2);
+
+    // An option with no values configures nothing, so the route refuses
+    // to create one.
+    const empty = await send("POST", `/admin/products/${productId}/options`, {
+      name: "Size",
+      values: [],
+    });
+    expect(empty.status).toBe(400);
+  });
+
+  test("a variant becomes a combination, and gets a signature for it", async () => {
+    const variantId = await newVariant(productId, `CFG-${crypto.randomUUID().slice(0, 6)}`);
+    const res = await send("PUT", `/admin/variants/${variantId}/options`, {
+      option_value_ids: [colourValues[0]!.id],
+    });
+    expect(res.status).toBe(200);
+
+    // Maintained by the statement trigger, not by the handler.
+    const body = (await res.json()) as { optionsSignature: string | null };
+    expect(body.optionsSignature).toBe(colourValues[0]!.id);
+  });
+
+  test("two variants cannot claim the same combination", async () => {
+    const second = await newVariant(productId, `CFG-${crypto.randomUUID().slice(0, 6)}`);
+    // The unique index on (product_id, options_signature) refuses this.
+    // No application cooperation involved, which is the point.
+    const clash = await send("PUT", `/admin/variants/${second}/options`, {
+      option_value_ids: [colourValues[0]!.id],
+    });
+    expect(clash.status).toBe(409);
+
+    // The other value is free, so the same variant configures fine.
+    const ok = await send("PUT", `/admin/variants/${second}/options`, {
+      option_value_ids: [colourValues[1]!.id],
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  test("an option value from another product cannot be attached at all", async () => {
+    otherProductId = await newProduct(`other-${crypto.randomUUID().slice(0, 8)}`);
+    const theirs = await send("POST", `/admin/products/${otherProductId}/options`, {
+      name: "Colour",
+      values: ["Graphite"],
+    });
+    const theirValue = ((await theirs.json()) as { values: { id: string }[] }).values[0]!.id;
+
+    const mine = await newVariant(productId, `CFG-${crypto.randomUUID().slice(0, 6)}`);
+    const res = await send("PUT", `/admin/variants/${mine}/options`, {
+      option_value_ids: [theirValue],
+    });
+
+    // Structurally impossible rather than validated: both composite FKs
+    // must resolve to the same product_id. errors.ts already carried a
+    // rule written for this exact refusal, before anything could cause it.
+    expect(res.status).toBe(422);
+    expect((await res.json()) as { error: { code: string } }).toMatchObject({
+      error: { code: "cross_product_option" },
+    });
+    expect(
+      await sqlValue(`select count(*) from variant_option_values where variant_id = '${mine}'`),
+    ).toBe("0");
+  });
+
+  test("the configuration shows up on the admin product detail", async () => {
+    const res = await send("GET", `/admin/products/${productId}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      options: { name: string; values: { value: string }[] }[];
+      variants: { optionValueIds: string[] }[];
+    };
+    expect(body.options.map((o) => o.name)).toContain("Colour");
+    expect(body.options[0]!.values.map((v) => v.value).sort()).toEqual(["Midnight", "Starlight"]);
+    expect(body.variants.some((v) => v.optionValueIds.length > 0)).toBe(true);
+  });
+
+  test("clearing the combination clears the signature too", async () => {
+    const variantId = await newVariant(productId, `CFG-${crypto.randomUUID().slice(0, 6)}`);
+    await send("PUT", `/admin/variants/${variantId}/options`, {
+      option_value_ids: [colourValues[0]!.id],
+    });
+    const cleared = await send("PUT", `/admin/variants/${variantId}/options`, {
+      option_value_ids: [],
+    });
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json()) as { optionsSignature: null }).toMatchObject({
+      optionsSignature: null,
+    });
+  });
+});

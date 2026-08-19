@@ -205,6 +205,114 @@ const defined = <T extends object>(o: T): Partial<T> =>
 
 /* ---------- writes ---------- */
 
+/**
+ * Options, and what makes this schema worth having.
+ *
+ * "Amazon / Apple-style configurations" is the README's first sentence,
+ * and none of it was reachable: product_options, product_option_values
+ * and variant_option_values had no write path, so every product created
+ * through this API was a simple one with a single unconfigured variant.
+ *
+ * BATCHED ON PURPOSE, both of them. refresh_signature() is a
+ * STATEMENT-level trigger over a transition table: insert a variant's
+ * option values in one statement and options_signature is computed once,
+ * and the unique index on (product_id, options_signature) then rejects a
+ * duplicate combination with no help from this code. Insert them one at a
+ * time and an intermediate signature can collide with another variant's
+ * final one, raising a unique violation that names nothing anyone can act
+ * on. The schema says so in a comment; these two routes are the reason
+ * it says it.
+ */
+const createOption = createRoute({
+  method: "post",
+  path: "/admin/products/{id}/options",
+  tags: ["admin", "catalog"],
+  summary: "Add an option and its values",
+  description:
+    "One call, because an option with no values configures nothing -- `Colour` on its own cannot be chosen.\n\nValues are inserted in a single statement. Names are unique per product and values unique per option, so a repeat is a 409.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1).max(60),
+            position: z.number().int().nonnegative().default(0),
+            values: z
+              .array(z.string().min(1).max(80))
+              .min(1, "An option needs at least one value")
+              .max(50),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Created",
+      content: {
+        "application/json": {
+          schema: z.object({
+            id: z.string().uuid(),
+            name: z.string(),
+            values: z.array(z.object({ id: z.string().uuid(), value: z.string() })),
+          }),
+        },
+      },
+    },
+    400: jsonError("The body does not validate"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    404: jsonError("No such product"),
+    409: jsonError("That option name, or one of those values, already exists"),
+  },
+});
+
+const setVariantOptions = createRoute({
+  method: "put",
+  path: "/admin/variants/{id}/options",
+  tags: ["admin", "catalog"],
+  summary: "Set which combination a variant is",
+  description:
+    "Replaces the whole set: send every option value this variant represents, not a delta.\n\nThe composite foreign keys make an option value from another product **impossible to attach** -- both sides have to resolve to the same `product_id` -- so a mistake here is a 422 (`cross_product_option`), never a variant quietly belonging to two products.\n\nA combination another variant already claims is refused by the unique index on `(product_id, options_signature)`, which the statement trigger maintains. Send an empty array to clear the combination.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            option_value_ids: z.array(z.string().uuid()).max(20),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Set",
+      content: {
+        "application/json": {
+          schema: z.object({
+            variantId: z.string().uuid(),
+            optionValueIds: z.array(z.string().uuid()),
+            optionsSignature: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    400: jsonError("The body does not validate"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    404: jsonError("No such variant"),
+    409: jsonError("That combination is already taken by another variant"),
+    422: jsonError("An option value belonging to a different product"),
+  },
+});
+
 const createProduct = createRoute({
   method: "post",
   path: "/admin/products",
@@ -669,4 +777,100 @@ export const adminCatalogRoute = new OpenAPIHono({ defaultHook: validationHook }
 
     c.get("log")?.info({ id, fields: Object.keys(patch) }, "catalog.variant_updated");
     return c.json({ id }, 200);
+  })
+
+  .openapi(createOption, async (c) => {
+    const { id } = c.req.valid("param");
+    const { name, position, values } = c.req.valid("json");
+    const db = c.get("caller").db;
+
+    const parent = await db.from("products").select("id").eq("id", id).maybeSingle();
+    throwOnDbError(parent.error);
+    if (!parent.data) throw new HTTPException(404, { message: "No such product" });
+
+    const option = await db
+      .from("product_options")
+      .insert({ product_id: id, name, position })
+      .select("id")
+      .single();
+    throwOnDbError(option.error);
+    const optionId = (option.data as { id: string }).id;
+
+    // One statement. product_id is denormalized onto the value so the
+    // composite FK can pin it, and the FK itself refuses a product_id
+    // that disagrees with the option's -- so passing it here cannot
+    // introduce the inconsistency it looks like it might.
+    const created = await db
+      .from("product_option_values")
+      .insert(
+        values.map((value, i) => ({
+          option_id: optionId,
+          product_id: id,
+          value,
+          position: i,
+        })),
+      )
+      .select("id, value");
+    throwOnDbError(created.error);
+
+    c.get("log")?.info({ productId: id, optionId, values: values.length }, "catalog.option_created");
+    return c.json(
+      {
+        id: optionId,
+        name,
+        values: (created.data ?? []) as unknown as { id: string; value: string }[],
+      },
+      201,
+    );
+  })
+
+  .openapi(setVariantOptions, async (c) => {
+    const { id } = c.req.valid("param");
+    const { option_value_ids } = c.req.valid("json");
+    const db = c.get("caller").db;
+
+    const variant = await db
+      .from("product_variants")
+      .select("id, product_id")
+      .eq("id", id)
+      .maybeSingle();
+    throwOnDbError(variant.error);
+    if (!variant.data) throw new HTTPException(404, { message: "No such variant" });
+    const productId = (variant.data as { product_id: string }).product_id;
+
+    // Clear then set, each in one statement. The delete drops the
+    // signature to null and the insert recomputes it once, so there is
+    // no intermediate value to collide with another variant's.
+    const cleared = await db.from("variant_option_values").delete().eq("variant_id", id);
+    throwOnDbError(cleared.error);
+
+    if (option_value_ids.length > 0) {
+      const attached = await db.from("variant_option_values").insert(
+        option_value_ids.map((option_value_id) => ({
+          variant_id: id,
+          option_value_id,
+          // Both composite FKs resolve through this. A value belonging to
+          // another product fails the second one rather than attaching.
+          product_id: productId,
+        })),
+      );
+      throwOnDbError(attached.error);
+    }
+
+    const after = await db
+      .from("product_variants")
+      .select("options_signature")
+      .eq("id", id)
+      .single();
+    throwOnDbError(after.error);
+
+    c.get("log")?.info({ id, count: option_value_ids.length }, "catalog.variant_options_set");
+    return c.json(
+      {
+        variantId: id,
+        optionValueIds: option_value_ids,
+        optionsSignature: (after.data as { options_signature: string | null }).options_signature,
+      },
+      200,
+    );
   });
