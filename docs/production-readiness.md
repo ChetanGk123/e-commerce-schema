@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#10, #14, #17 done; #1 part-done. The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#10, #14, #17 done; #1 and #11 part-done. The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -276,11 +276,31 @@ that were never built, and the seam that nothing tests.**
       ceiling fires first and `database_timeout` becomes unreachable, so an
       operator could never tell which of the two was actually wrong.
 
-- [ ] **11. No metrics, no tracing, no alerting.** Structured pino with request
-      ids is good for reading one request; "checkout p99" and "5xx in the last
-      hour" are grep questions. The two conditions that should page someone are
-      now both computed — `GET /admin/outbox` and `GET /admin/webhooks` — but
-      only when a human opens the page. Nothing pushes.
+- [~] **11. No metrics, no tracing, no alerting.** — **alerting done**
+      (`20260801002700_ops_alerts.sql`); metrics and tracing still open.
+      *What was wrong:* `/admin/outbox` and `/admin/webhooks` compute exactly
+      what is broken and both wait to be asked. A mail queue that stopped
+      draining and a payment callback that could not be applied are the two
+      failures here that are silent, unbounded and expensive — the first means
+      every order confirmation since is unsent, the second means a customer
+      paid and this database still calls their order pending.
+      *What it does now:* the jobs tick checks both and calls
+      `raise_ops_alert()`, which writes one notification per active owner and
+      admin — not every staff member, because an alert everyone receives is one
+      nobody owns. Each also logs at error level with a stable message
+      (`ops.outbox_stalled`, `ops.webhooks_exhausted`), which is the hook for a
+      log shipper that can actually page.
+      *The cooldown is the load-bearing part.* This runs every sixty seconds,
+      so a persisting condition must raise once and then stay quiet or the
+      notification feed becomes the outage. Dedupe is on *unread*: once someone
+      has seen it and the problem recurs, it speaks again, because silence
+      would otherwise be indistinguishable from a fix.
+      **Still open, and needing a decision rather than effort:** metrics and
+      tracing. Prometheus, OTLP and "nothing, read the logs" are different
+      products with different infrastructure behind them, and guessing which
+      would mean building a `/metrics` endpoint nothing scrapes. A notification
+      is seen when someone opens the admin — better than never, worse than a
+      phone ringing.
 
 - [ ] **12. The rate limiter is per-instance.** Documented honestly in
       `src/limits.ts`, and simply wrong the moment a second container starts.

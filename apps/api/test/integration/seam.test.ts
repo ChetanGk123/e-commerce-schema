@@ -1663,3 +1663,81 @@ describe.skipIf(!up)("customers can manage their own account", () => {
     expect(res.status).toBe(404);
   });
 });
+
+/**
+ * Operational alerts.
+ *
+ * The dedupe is the part worth testing: this runs on a sixty-second
+ * loop, so a condition that persists must raise once and then stay
+ * quiet. Get that wrong and the notification feed becomes the outage.
+ */
+describe.skipIf(!up)("silent failures reach a person", () => {
+  const OWNER = "bbbbbbbb-0000-4000-8000-000000000001";
+  const PACKER = "bbbbbbbb-0000-4000-8000-000000000009";
+
+  beforeAll(async () => {
+    await sql(`
+      insert into auth.users (id, email) values
+        ('${OWNER}', 'owner@test.local'), ('${PACKER}', 'packer@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${OWNER}',  'owner@test.local',  'owner',     'Owner',  true),
+        ('${PACKER}', 'packer@test.local', 'warehouse', 'Packer', true)
+        on conflict (id) do update set role = excluded.role, is_active = true;
+      delete from notifications where kind like 'ops_%';
+    `);
+  });
+
+  const raise = (kind: string) =>
+    sqlValue(
+      `select raise_ops_alert('${kind}', 'Something is wrong', 'Details here', '{}'::jsonb)`,
+    );
+
+  const count = (kind: string) =>
+    sqlValue(`select count(*) from notifications where kind = '${kind}'`);
+
+  test("an alert reaches owners and admins, and only them", async () => {
+    expect(Number(await raise("ops_test_one"))).toBeGreaterThan(0);
+
+    // Not every staff member: an alert everyone receives is one nobody
+    // owns, and a packer cannot act on a stuck payment callback anyway.
+    expect(
+      await sqlValue(
+        `select count(*) from notifications
+          where kind = 'ops_test_one' and recipient_id = '${PACKER}'`,
+      ),
+    ).toBe("0");
+    expect(
+      await sqlValue(
+        `select count(*) from notifications
+          where kind = 'ops_test_one' and recipient_id = '${OWNER}'`,
+      ),
+    ).toBe("1");
+  });
+
+  test("raising it again while it is unread says nothing", async () => {
+    // This runs on a sixty-second loop. Without the cooldown a stuck
+    // outbox would insert an alert per admin per tick.
+    const before = await count("ops_test_one");
+    expect(await raise("ops_test_one")).toBe("0");
+    expect(await count("ops_test_one")).toBe(before);
+  });
+
+  test("once it has been read and the problem returns, it speaks again", async () => {
+    // Read means someone looked. If the condition comes back after that
+    // they need telling again -- silence would be indistinguishable from
+    // the problem having been fixed.
+    await sql(`update notifications set read_at = now() where kind = 'ops_test_one';`);
+    expect(Number(await raise("ops_test_one"))).toBeGreaterThan(0);
+  });
+
+  test("a deactivated admin stops being told", async () => {
+    await sql(`
+      delete from notifications where kind = 'ops_test_two';
+      update staff_users set is_active = false where id = '${OWNER}';
+    `);
+    const told = Number(await raise("ops_test_two"));
+    await sql(`update staff_users set is_active = true where id = '${OWNER}';`);
+    expect(told).toBe(0);
+  });
+});

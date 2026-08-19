@@ -250,6 +250,119 @@ async function runSweepers(): Promise<void> {
   }
 }
 
+/**
+ * The two silent failures, said out loud.
+ *
+ * /admin/outbox and /admin/webhooks compute exactly what is wrong and
+ * both wait to be asked. A mail queue that stopped draining and a
+ * payment callback that could not be applied are the failures here that
+ * are silent, unbounded and expensive -- the first means every order
+ * confirmation since is unsent, the second means a customer paid and
+ * this database still calls their order pending.
+ *
+ * So the tick checks them and tells somebody. raise_ops_alert() writes
+ * one notification per active owner and admin, with a cooldown, so a
+ * condition that persists does not become the outage itself.
+ *
+ * These also log at error level with stable messages -- ops.outbox_stalled
+ * and ops.webhooks_exhausted -- which is the hook for a log shipper that
+ * can actually page someone. The notification is where staff already
+ * look; the log line is where an alert rule belongs.
+ */
+async function checkOps(): Promise<void> {
+  const db = serviceClient();
+
+  const outbox = await db.rpc("outbox_health");
+  if (outbox.error) {
+    log.error({ err: outbox.error.message }, "jobs.ops_check_failed");
+  } else {
+    const h = outbox.data as {
+      by_status: Record<string, number>;
+      oldest_queued_at: string | null;
+      stalled_sending: number;
+    };
+    const queued = h.by_status?.queued ?? 0;
+
+    if (h.stalled_sending > 0) {
+      log.error({ stalled: h.stalled_sending }, "ops.outbox_stalled");
+      await alert(
+        db,
+        "ops_outbox_stalled",
+        "Mail is stuck part-sent",
+        `${h.stalled_sending} message(s) have been claimed by a drainer that never finished. They are rescued automatically after ten minutes; if this keeps recurring the process is dying mid-send.`,
+        { stalled: h.stalled_sending },
+      );
+    } else if (queued > 500 && mailerConfigured()) {
+      log.error({ queued }, "ops.outbox_backlog");
+      await alert(
+        db,
+        "ops_outbox_backlog",
+        "The mail queue is not draining",
+        `${queued} messages are waiting. Order confirmations are among them.`,
+        { queued, oldest: h.oldest_queued_at },
+      );
+    } else if (queued > 0 && !mailerConfigured()) {
+      // Not an error: a store whose mail is not wired up yet is a
+      // deliberate state. It is worth saying once, because the symptom
+      // -- no confirmation emails -- looks like a bug from outside.
+      log.warn({ queued }, "ops.mailer_absent");
+      await alert(
+        db,
+        "ops_mailer_absent",
+        "No mail provider is configured",
+        `${queued} message(s) are queued and nothing will send them until MAIL_PROVIDER and its credentials are set.`,
+        { queued },
+      );
+    }
+  }
+
+  // Deliveries that ran out of retries. For a payment event that means
+  // the gateway took money this database never recorded.
+  const exhausted = await db
+    .from("webhook_events")
+    .select("id", { count: "exact", head: true })
+    .is("processed_at", null)
+    .gte("attempts", REDRIVE_MAX_ATTEMPTS);
+
+  if (exhausted.error) {
+    log.error({ err: exhausted.error.message }, "jobs.ops_check_failed");
+    return;
+  }
+  const stuck = exhausted.count ?? 0;
+  if (stuck > 0) {
+    log.error({ stuck }, "ops.webhooks_exhausted");
+    await alert(
+      db,
+      "ops_webhooks_exhausted",
+      "A payment callback could not be applied",
+      `${stuck} delivery(ies) gave up after ${REDRIVE_MAX_ATTEMPTS} attempts. If any is a capture, a customer has been charged for an order still marked pending. See GET /admin/webhooks.`,
+      { stuck },
+    );
+  }
+}
+
+async function alert(
+  db: ReturnType<typeof serviceClient>,
+  kind: string,
+  title: string,
+  body: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const { data: told, error } = await db.rpc("raise_ops_alert", {
+    p_kind: kind,
+    p_title: title,
+    p_body: body,
+    p_data: data,
+  });
+  if (error) {
+    log.error({ err: error.message, kind }, "jobs.alert_failed");
+    return;
+  }
+  if ((told as unknown as number) > 0) {
+    log.warn({ kind, recipients: told }, "ops.alert_raised");
+  }
+}
+
 let timer: ReturnType<typeof setInterval> | undefined;
 
 /**
@@ -277,6 +390,8 @@ export async function startJobs(): Promise<void> {
       await drainOutbox();
       await redriveWebhooks();
       if (!cronOwns) await runSweepers();
+      // Last, so it reports on the state the pass above just left.
+      await checkOps();
     } catch (err) {
       // A throwing tick must not kill the interval, or the outbox stops
       // draining and nothing says why.
