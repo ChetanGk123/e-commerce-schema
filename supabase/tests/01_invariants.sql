@@ -1225,6 +1225,155 @@ $$, 'an issued invoice cannot be removed');
 reset request.jwt.claim.sub;
 
 -- ============================================================
+-- Customers, support and engagement (0019)
+-- ============================================================
+
+-- The one that was live: anonymize_customer() is SECURITY DEFINER and
+-- was granted to `authenticated` with no check inside it, so any
+-- signed-in shopper could erase any other customer.
+do $$
+declare scrubbed timestamptz;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  begin
+    perform anonymize_customer('a0000000-0000-4000-8000-000000000002');
+    raise exception 'FAIL  a customer erased a DIFFERENT customer';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+
+  select anonymized_at into scrubbed from customers
+  where id = 'a0000000-0000-4000-8000-000000000002';
+  if scrubbed is not null then
+    raise exception 'FAIL  the refusal still scrubbed the target';
+  end if;
+
+  raise notice 'PASS  anonymize_customer -- one customer cannot erase another';
+end $$;
+
+-- DPDP gives people an erasure right over their own data, so
+-- self-service has to survive the fix.
+do $$
+declare nm text;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000002', true);
+  perform anonymize_customer('a0000000-0000-4000-8000-000000000002');
+
+  select full_name into nm from customers
+  where id = 'a0000000-0000-4000-8000-000000000002';
+  if nm <> 'Deleted customer' then
+    raise exception 'FAIL  self-erasure left the name as %', nm;
+  end if;
+  raise notice 'PASS  anonymize_customer -- a customer may still erase themselves';
+end $$;
+
+-- Staff, but not just any staff: the fixture is a warehouse account.
+do $$
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  if staff_has_role('owner', 'admin') then
+    raise exception 'FAIL  a warehouse account reports as owner/admin';
+  end if;
+  begin
+    perform anonymize_customer('a0000000-0000-4000-8000-000000000001');
+    raise exception 'FAIL  a warehouse account erased a customer';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+  raise notice 'PASS  anonymize_customer -- erasing someone else needs owner or admin';
+end $$;
+
+-- Support: the two halves of B10's validation bullet.
+do $$
+declare tid uuid; seen int; pri text;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  tid := open_ticket('Parcel never arrived', 'It has been eight days now.', 'shipping');
+
+  select priority into pri from support_tickets where id = tid;
+  if pri <> 'normal' then
+    raise exception 'FAIL  a customer opened a ticket at priority %', pri;
+  end if;
+
+  -- A staff-only note on the ticket.
+  perform set_config('request.jwt.claim.sub',
+                     'b0000000-0000-4000-8000-000000000001', true);
+  perform admin_reply_ticket(tid, 'Courier lost it. Insurance claim pending.', true);
+
+  -- Back to the customer, under RLS.
+  set local role authenticated;
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+
+  select count(*) into seen from ticket_messages where ticket_id = tid;
+  if seen <> 1 then
+    raise exception 'FAIL  a customer sees % ticket messages; the internal note is one of them', seen;
+  end if;
+
+  select count(*) into seen from ticket_messages
+  where ticket_id = tid and body like '%Insurance%';
+  if seen <> 0 then
+    raise exception 'FAIL  the internal note is readable by the customer';
+  end if;
+
+  reset role;
+  raise notice 'PASS  support -- a customer cannot read an internal note or open at a priority they chose';
+end $$;
+
+-- A customer-authored internal note is a contradiction, and the policy
+-- says so rather than the API remembering to.
+do $$
+declare tid uuid;
+begin
+  perform set_config('request.jwt.claim.sub',
+                     'a0000000-0000-4000-8000-000000000001', true);
+  select id into tid from support_tickets
+  where customer_id = 'a0000000-0000-4000-8000-000000000001' limit 1;
+
+  set local role authenticated;
+  begin
+    insert into ticket_messages (ticket_id, sender_type, sender_id, body, is_internal)
+    values (tid, 'staff', 'a0000000-0000-4000-8000-000000000001', 'I am staff now', true);
+    reset role;
+    raise exception 'FAIL  a customer wrote an internal note as staff';
+  exception when others then
+    reset role;
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+  raise notice 'PASS  support -- a customer cannot post as staff, internal or not';
+end $$;
+
+-- reviews.is_verified is generated from order_item_id. It is a trust
+-- badge shown to shoppers, so it must not be something anyone can send.
+do $$
+declare n int;
+begin
+  select count(*) into n
+  from information_schema.columns
+  where table_name = 'reviews' and column_name = 'is_verified'
+    and is_generated = 'ALWAYS';
+  if n <> 1 then
+    raise exception 'FAIL  reviews.is_verified is not a generated column';
+  end if;
+
+  begin
+    insert into reviews (product_id, customer_id, rating, is_verified)
+    values ('c0000000-0000-4000-8000-000000000001',
+            'a0000000-0000-4000-8000-000000000001', 5, true);
+    raise exception 'FAIL  is_verified was accepted from the client';
+  exception when others then
+    if sqlerrm like 'FAIL%' then raise; end if;
+  end;
+  raise notice 'PASS  reviews -- is_verified is generated, not claimed';
+end $$;
+
+reset request.jwt.claim.sub;
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

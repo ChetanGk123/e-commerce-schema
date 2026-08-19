@@ -7,8 +7,10 @@ import { requestLogger } from "./logger";
 import { validationHook } from "./schemas";
 import { adminCatalogRoute } from "./routes/admin-catalog";
 import { cartRoute } from "./routes/cart";
+import { accountRoute } from "./routes/account";
 import { catalogRoute } from "./routes/catalog";
 import { checkoutRoute } from "./routes/checkout";
+import { engagementRoute } from "./routes/engagement";
 import { fulfilmentRoute } from "./routes/fulfilment";
 import { healthRoute } from "./routes/health";
 import { inventoryRoute } from "./routes/inventory";
@@ -17,6 +19,7 @@ import { meRoute } from "./routes/me";
 import { paymentsRoute } from "./routes/payments";
 import { returnsRoute } from "./routes/returns";
 import { shippingRoute } from "./routes/shipping";
+import { supportRoute } from "./routes/support";
 import { walletRoute } from "./routes/wallet";
 import { webhooksRoute } from "./routes/webhooks";
 
@@ -45,7 +48,10 @@ const routes = app
   .route("/", fulfilmentRoute)
   .route("/", returnsRoute)
   .route("/", walletRoute)
-  .route("/", invoicingRoute);
+  .route("/", invoicingRoute)
+  .route("/", accountRoute)
+  .route("/", supportRoute)
+  .route("/", engagementRoute);
 
 /**
  * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes

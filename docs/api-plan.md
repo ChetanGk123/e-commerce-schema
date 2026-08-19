@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B9 done (bar courier/messaging webhooks), B10 next`
+**Status**: `B0-B10 done (bar courier/messaging webhooks), B11 next`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -437,11 +437,40 @@ promise the database will not keep.
 
 ### B10 — Customers, support, engagement · Medium
 
-- [ ] Customers, addresses, communication preferences; `anonymize_customer` behind `owner`/`admin`
-- [ ] Support tickets + messages (`is_internal` never exposed to customers), enquiries
-- [ ] Reviews moderation; `is_verified` is generated — read only
-- [ ] Notifications, stock alerts, wishlist
-- [ ] **Validate**: a customer cannot read an internal ticket note or set ticket priority
+- [x] Customers, addresses, communication preferences; `anonymize_customer` behind `owner`/`admin`
+- [x] Support tickets + messages (`is_internal` never exposed to customers), enquiries
+- [x] Reviews moderation; `is_verified` is generated — read only
+- [x] Notifications, stock alerts, wishlist
+- [x] **Validate**: a customer cannot read an internal ticket note or set ticket priority
+
+**Found here, and it was live.** `anonymize_customer()` is SECURITY DEFINER,
+takes a customer id, and had **no authorisation check of any kind**. B3 granted
+it to `authenticated` so the API could call it. Between them, any signed-in
+shopper could erase any other customer — name, email, phone, addresses, consent,
+wishlist, stock alerts, and the address on every past order. Reproduced against
+the live database before fixing: three lines of SQL as an ordinary shopper.
+
+Now guarded inside the function, not in a handler: a customer may erase
+themselves (the DPDP right), anyone else needs `owner` or `admin` via the new
+`staff_has_role()`. The check has to live in SQL — every staff member can reach
+PostgREST directly with their own JWT, so a guard in a route is advice.
+
+**Decided here.**
+
+*The customer-facing ticket schema does not declare `isInternal` at all.* It
+briefly did, as an optional field, and the first version of the test missed it
+because both schemas sit behind `$ref`s — the test now resolves refs before
+searching. `AdminTicket` also had to override `messages` explicitly: `.extend()`
+does not reach inside an array, so it was publishing a contract that understated
+what staff actually receive.
+
+*`open_ticket` and `request_return` are both SECURITY INVOKER.* RLS already pins
+status, priority, assignment and ownership on insert; a definer function would
+discard all of it and reimplement it worse. What they add is atomicity.
+
+*Reviews are moderated by status only.* Rating, title and body are the
+customer's words, and an endpoint letting staff edit them turns the review
+section into marketing copy.
 
 ### B11 — Jobs · Low
 
@@ -532,7 +561,7 @@ admin's read-only screens.
 | B7 Inventory & fulfilment | **done** | `20260801001600_inventory.sql`; sweepers moved into migrations |
 | B8 Returns & money | **done** | `20260801001700_returns_wallet.sql` |
 | B9 Invoicing | **done** | `20260801001800_invoicing.sql` |
-| B10 Customers & support | not started | |
+| B10 Customers & support | **done** | `20260801001900_support.sql`; closes a live erasure hole |
 | B11 Jobs | not started | pg_cron + outbox drain |
 | B12 Cross-cutting | not started | |
 | B13 Realtime | scope-guarded | Supabase Realtime unless a screen demands more |
