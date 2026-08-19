@@ -135,13 +135,22 @@ test-api: stack
 # Rehearsing a different procedure than the one you run is rehearsing
 # nothing.
 #
-# The restored copy gets NO shim and NO migrations -- if `anon`,
-# `authenticated`, the auth schema or a single RLS policy failed to come
-# across, the invariants say so. That is the assertion: not "pg_restore
-# exited 0", but "the restored database still enforces everything the
-# original did".
+# The restored copy gets NO shim and NO migrations. It is fingerprinted
+# instead -- roles, every policy, RLS enabled and forced per table, every
+# function signature, every row count -- and diffed against the source.
+# The assertion is not "pg_restore exited 0" but "the restored database
+# is the one that was backed up", which is the only claim a backup makes.
+# 01_invariants.sql cannot do that job: it loads its own fixtures, so it
+# will not run against a database that has data in it.
+#
+# The mkdir is not tidiness. The shell opens dist/backup/.last for writing
+# before backup.sh ever runs, so on a clone that has never built that
+# directory this target used to fail on its own first line. It only
+# worked here because an earlier run had left the directory behind --
+# which is what a CI runner, starting from nothing every time, is for.
 # ------------------------------------------------------------
 restore-drill: seed
+	@mkdir -p dist/backup
 	@bash scripts/backup.sh $(CONTAINER) dist/backup > dist/backup/.last
 	@echo "==> starting an empty $(PGIMAGE) to restore into"
 	@docker rm -f $(RESTORE) >/dev/null 2>&1 || true

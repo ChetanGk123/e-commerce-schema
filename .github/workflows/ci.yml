@@ -82,6 +82,14 @@ jobs:
       - name: API <-> database seam (make test-api)
         run: make test-api
 
+      # Backs the seeded database up with scripts/backup.sh, restores it
+      # into an empty container with scripts/restore.sh, and diffs a
+      # fingerprint of both. It exists because nothing else in this repo
+      # fails when backups are skipped -- and a drill that only ever runs
+      # when somebody remembers to run it is on its way to not running.
+      - name: Backup restores faithfully (make restore-drill)
+        run: make restore-drill
+
       # A stack that failed to start is the failure mode worth planning
       # for, because its natural symptom is a suite that ran no tests.
       # harness.ts now refuses to skip when the stack was configured, so
@@ -92,3 +100,4 @@ jobs:
           docker ps -a
           docker logs ecomm-verify 2>&1 | tail -40 || true
           docker logs ecomm-postgrest 2>&1 | tail -40 || true
+          docker logs ecomm-restore 2>&1 | tail -40 || true
