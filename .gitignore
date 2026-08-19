@@ -1,2 +1,13 @@
 dist/
 .vscode/
+
+# workspace
+node_modules/
+.turbo/
+.next/
+*.tsbuildinfo
+
+# env -- never commit. bun.lock IS committed.
+.env
+.env.local
+.env*.local

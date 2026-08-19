@@ -79,6 +79,10 @@ VIEWS = {
     "storefront_variants": "StorefrontVariant",
     "public_settings": "PublicSettings",
     "customer_credit_balances": "CustomerCreditBalance",
+    # Reporting views from 0012. Both are security_invoker, so what a caller
+    # sees through them is still decided by RLS.
+    "admin_sales_daily": "AdminSalesDaily",
+    "admin_low_stock": "AdminLowStock",
 }
 
 # (table, column) -> TS type from ./enums

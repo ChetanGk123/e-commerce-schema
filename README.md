@@ -4,7 +4,8 @@ Postgres schema for an e-commerce store with full product variant support —
 Amazon / Apple-style configurations where each variant carries its own price,
 description, specs, stock, and images.
 
-Built for Postgres 15+ / Supabase. 51 tables, applied as ordered migrations.
+Built for Postgres 15+ / Supabase. 51 tables, applied as ordered migrations —
+currently one squashed baseline, with changes added as new migrations beside it.
 
 ## Quick start
 
@@ -51,23 +52,37 @@ migration — that is the one thing a combined file cannot do for you.
 ```
 supabase/
   migrations/           applied in filename order, each wrapped in a transaction
-    ..._extensions      citext, pg_trgm, btree_gist, pgcrypto
-    ..._functions_base  table-independent helpers
-    ..._identity        staff_users, customers, addresses, consent
-    ..._catalog         products -> options -> option values -> variants
-    ..._commerce        orders, payments, carts, inventory, fulfilment
-    ..._money           discounts, returns, refunds, GST invoicing, wallet
-    ..._operations      shipping, risk, engagement, messaging, support, plumbing
-    ..._triggers        the invariants: oversell guard, append-only, numbering
-    ..._indexes         access paths
-    ..._views_rls_grants  storefront views + Row Level Security
-    ..._auth_signup     auth.users -> customers on signup (Supabase only)
-  jobs/retention.sql    scheduled sweepers (NOT a migration)
+    ..._baseline        the whole schema, squashed. Sections, in order:
+                          extensions      citext, pg_trgm, btree_gist, pgcrypto
+                          functions_base  table-independent helpers
+                          identity        staff_users, customers, addresses, consent
+                          catalog         products -> options -> option values -> variants
+                          commerce        orders, payments, carts, inventory, fulfilment
+                          money           discounts, returns, refunds, GST invoicing, wallet
+                          operations      shipping, risk, engagement, messaging, support
+                          triggers        the invariants: oversell, append-only, numbering
+                          indexes         access paths
+                          views_rls_grants  storefront views + Row Level Security
+                          auth_signup     auth.users -> customers on signup (Supabase only)
+    ..._admin_rpc       operations that must be atomic (capture, ship, invoice)
+    ..._catalog         search_products, shipping_quote
+    ..._checkout        checkout(), apportion_taxable()
+    ..._payments        webhook recording, capture, failure
+    ..._inventory       sweepers, manual stock movements, reservation monitor
+    ..._returns_wallet  returns, refunds, store credit, gift cards
+    ..._invoicing       credit notes, the e-invoice stamp
+    ..._support         erasure guard, tickets, SLA clock
+    ..._jobs            the outbox drain: claim, settle, rescue
+  jobs/retention.sql    cron.schedule calls only — the sweeper FUNCTIONS are
+                        in the migrations, because a file nothing applies is
+                        a function that quietly does not exist
   seed.sql              demo data
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
-    01_invariants.sql   38 assertions
+    01_invariants.sql   87 assertions
 types/                  TypeScript types — regenerate with `make types`
+apps/api/               the shared backend — see apps/api/README.md
+                        browsable at /docs, importable from /openapi.json
 ```
 
 ## The identity contract

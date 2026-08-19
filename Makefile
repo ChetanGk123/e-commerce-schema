@@ -101,7 +101,10 @@ lint:
 	@echo "==> migrations missing a transaction wrapper"
 	@for f in $(MIGRATIONS); do grep -q '^begin;' $$f || echo "    $$f"; done
 	@echo "==> functions missing a pinned search_path"
-	@grep -c 'create or replace function' supabase/migrations/*.sql | grep -v ':0' | cut -d: -f1 | \
-		xargs -I{} sh -c 'a=$$(grep -c "create or replace function" {}); b=$$(grep -c "set search_path" {}); [ "$$a" -le "$$b" ] || echo "    {} ($$a functions, $$b pinned)"'
+	@for f in $(MIGRATIONS); do \
+		a=$$(grep -c 'create or replace function' $$f); \
+		b=$$(grep -c 'set search_path' $$f); \
+		[ "$$a" -eq 0 ] || [ "$$a" -le "$$b" ] || echo "    $$f ($$a functions, $$b pinned)"; \
+	done
 	@echo "==> SECURITY DEFINER functions (each one needs review)"
 	@grep -n 'security definer' supabase/migrations/*.sql | sed 's/^/    /' || true
