@@ -133,6 +133,12 @@ that were never built, and the seam that nothing tests.**
       **Not covered:** images are outside `backup.sh`. On R2 that is
       Cloudflare's durability rather than one host's disk, which is the
       upgrade — but `dist/backup/` still will not contain them.
+      **Nor is deletion, in the case that matters.** `product_images` has two
+      `ON DELETE CASCADE` foreign keys, so deleting a product or a variant
+      removes its image rows with the API not involved and unable to be —
+      every object orphaned, silently. `docs/image-management.md` plans that
+      out: a trigger-fed GC queue for the cascade, a sweeper on the jobs tick,
+      and a reconciler with rails for the objects no row ever recorded.
 
 - [x] **2. No discount or coupon management.** — **done**.
       `POST`/`GET` `/admin/discounts`, `PATCH /admin/discounts/{id}`, reusing

@@ -521,6 +521,10 @@ Three things that will bite, in the order they usually do:
    working the moment the backend changes, and the symptom is transformations failing
    while plain images still load.
 
+The lifecycle — how images are collected when they stop being used, and why a cascade
+delete is the case that needs a database trigger rather than API code — is planned in
+`docs/image-management.md`.
+
 Uploads go through `POST /admin/products/{id}/images`, staff only. The API decides the
 file type by reading the first bytes rather than trusting `Content-Type`, and generates
 the object key itself — an uploaded filename is an attacker's string, and a repeated one
