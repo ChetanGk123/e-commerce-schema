@@ -353,3 +353,181 @@ describe.skipIf(!up)("catalog writes", () => {
     expect(res.status).toBe(403);
   });
 });
+
+/**
+ * Discounts, store settings and shipping rates -- the three surfaces that
+ * `setup.md` configured by SQL at install and nothing could change since.
+ *
+ * Each one is here rather than in the unit suite for the same reason: the
+ * rules that make them safe live in the database. The overlap constraint
+ * on rate bands, the CHECK that stops a spent code being oversold, the
+ * audit row on a changed GSTIN -- none of that exists in the handler.
+ */
+describe.skipIf(!up)("store configuration writes", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  let staffAuth: Record<string, string>;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values ('${STAFF}', 'staff@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do nothing;
+    `);
+    staffAuth = { Authorization: `Bearer ${await mintToken("authenticated", STAFF)}` };
+  });
+
+  const send = (method: string, path: string, body?: unknown) =>
+    app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json", ...staffAuth },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  test("a discount can be created and then withdrawn", async () => {
+    const created = await send("POST", "/admin/discounts", {
+      code: "seamtest10",
+      kind: "percent",
+      value: 10,
+      max_uses: 1,
+    });
+    expect(created.status).toBe(201);
+    const d = (await created.json()) as { id: string; code: string; usedCount: number };
+
+    // The schema upper-cases it, and citext makes the uniqueness
+    // case-insensitive on top of that.
+    expect(d.code).toBe("SEAMTEST10");
+    expect(d.usedCount).toBe(0);
+
+    // Same code in a different case is still the same code.
+    const dupe = await send("POST", "/admin/discounts", {
+      code: "SeamTest10",
+      kind: "percent",
+      value: 5,
+    });
+    expect(dupe.status).toBe(409);
+
+    const off = await send("PATCH", `/admin/discounts/${d.id}`, { is_active: false });
+    expect(off.status).toBe(200);
+    expect((await off.json()) as { isActive: boolean }).toMatchObject({ isActive: false });
+  });
+
+  test("used_count cannot be set through the API", async () => {
+    // The counter moves only in the transaction that redeems the code;
+    // discounts_within_max_uses is what stops a single-use code being
+    // claimed twice. An endpoint that could wind it back would undo that.
+    const res = await send("POST", "/admin/discounts", {
+      code: "seamcounter",
+      kind: "fixed",
+      value: 50,
+      used_count: 99,
+    });
+    expect(res.status).toBe(201);
+    expect(await sqlValue(`select used_count from discounts where code = 'SEAMCOUNTER'`)).toBe("0");
+  });
+
+  test("the GSTIN on every future invoice can be corrected, and is audited", async () => {
+    const res = await send("PATCH", "/admin/settings", {
+      seller_gstin: "29ABCDE1234F1Z5",
+      seller_state_code: "29",
+      cod_enabled: false,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      sellerGstin: "29ABCDE1234F1Z5",
+      codEnabled: false,
+    });
+
+    const audited = await sqlValue(
+      `select count(*) from audit_logs
+        where table_name = 'store_settings' and staff_id = '${STAFF}'`,
+    );
+    expect(Number(audited)).toBeGreaterThan(0);
+  });
+
+  test("a state code that disagrees with the GSTIN is refused before the database sees it", async () => {
+    // Invoices are immutable once issued and numbered gap-free, so a
+    // wrong seller state is not something a later edit repairs.
+    const res = await send("PATCH", "/admin/settings", {
+      seller_gstin: "29ABCDE1234F1Z5",
+      seller_state_code: "07",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("an overlapping rate band is refused by the exclusion constraint", async () => {
+    const zone = await send("POST", "/admin/shipping/zones", {
+      name: `Seam Zone ${crypto.randomUUID().slice(0, 8)}`,
+    });
+    expect(zone.status).toBe(201);
+    const zoneId = ((await zone.json()) as { id: string }).id;
+
+    const first = await send("POST", "/admin/shipping/rates", {
+      zone_id: zoneId,
+      min_weight_grams: 0,
+      max_weight_grams: 1000,
+      rate: 60,
+    });
+    expect(first.status).toBe(201);
+
+    // Straddles the first band. rates_no_overlap is a GiST exclusion
+    // constraint, so this is refused by the database, not by the handler.
+    const clash = await send("POST", "/admin/shipping/rates", {
+      zone_id: zoneId,
+      min_weight_grams: 500,
+      max_weight_grams: 2000,
+      rate: 90,
+    });
+    expect(clash.status).toBe(409);
+    const body = (await clash.json()) as { error: { message: string } };
+    expect(body.error.message).not.toMatch(/constraint|gist|exclude/i);
+
+    // Retiring the first one makes room, which is the documented way to
+    // replace a band.
+    const rateId = ((await first.json()) as { id: string }).id;
+    expect((await send("PATCH", `/admin/shipping/rates/${rateId}`, { is_active: false })).status).toBe(200);
+    const replacement = await send("POST", "/admin/shipping/rates", {
+      zone_id: zoneId,
+      min_weight_grams: 500,
+      max_weight_grams: 2000,
+      rate: 90,
+    });
+    expect(replacement.status).toBe(201);
+  });
+
+  test("adding a pincode makes it serviceable to the storefront", async () => {
+    const zone = await send("POST", "/admin/shipping/zones", {
+      name: `Seam Pin Zone ${crypto.randomUUID().slice(0, 8)}`,
+    });
+    const zoneId = ((await zone.json()) as { id: string }).id;
+    await send("POST", "/admin/shipping/rates", {
+      zone_id: zoneId,
+      min_weight_grams: 0,
+      rate: 75,
+      delivery_days: 4,
+    });
+
+    // Unlisted means unserviceable: checkout refuses it outright.
+    const before = await app.request("/shipping/quote?pincode=799001&weight_grams=500&order_total=500");
+    expect((await before.json()) as { serviceable: boolean }).toMatchObject({ serviceable: false });
+
+    const put = await send("PUT", "/admin/shipping/pincodes/799001", {
+      zone_id: zoneId,
+      cod_allowed: true,
+      courier: "Seam Couriers",
+    });
+    expect(put.status).toBe(200);
+
+    const after = await app.request("/shipping/quote?pincode=799001&weight_grams=500&order_total=500");
+    expect((await after.json()) as { serviceable: boolean; rate: number }).toMatchObject({
+      serviceable: true,
+      rate: 75,
+    });
+  });
+});

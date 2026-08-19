@@ -16,6 +16,7 @@ import { accountRoute } from "./routes/account";
 import { authRoute } from "./routes/auth";
 import { catalogRoute } from "./routes/catalog";
 import { checkoutRoute } from "./routes/checkout";
+import { discountsRoute } from "./routes/discounts";
 import { emailTemplatesRoute } from "./routes/email-templates";
 import { engagementRoute } from "./routes/engagement";
 import { fulfilmentRoute } from "./routes/fulfilment";
@@ -27,7 +28,8 @@ import { meRoute } from "./routes/me";
 import { ordersRoute } from "./routes/orders";
 import { paymentsRoute } from "./routes/payments";
 import { returnsRoute } from "./routes/returns";
-import { shippingRoute } from "./routes/shipping";
+import { settingsRoute } from "./routes/settings";
+import { adminShippingRoute, shippingRoute } from "./routes/shipping";
 import { staffRoute } from "./routes/staff";
 import { supportRoute } from "./routes/support";
 import { walletRoute } from "./routes/wallet";
@@ -150,6 +152,9 @@ const routes = app
   .route("/", catalogRoute)
   .route("/", adminCatalogRoute)
   .route("/", shippingRoute)
+  .route("/", adminShippingRoute)
+  .route("/", discountsRoute)
+  .route("/", settingsRoute)
   .route("/", cartRoute)
   .route("/", checkoutRoute)
   .route("/", ordersRoute)

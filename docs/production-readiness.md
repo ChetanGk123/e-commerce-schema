@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #5, #7, #8, #9, #10, #17 done — the API is deployable and the seam is tested. The rest open
+**Status**: #2, #3, #4, #5, #7, #8, #9, #10, #17 done; #1 part-done. The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -39,7 +39,7 @@ that were never built, and the seam that nothing tests.**
 | ~~9~~ | ~~No readiness probe~~ | **done** |
 | ~~17~~ | ~~No integration tests~~ | **done** |
 | 1 | Catalog writes — **products and variants done**; options, images, categories still SQL | |
-| 2–4 | No discount, settings or shipping writes | Still SQL-only |
+| ~~2–4~~ | ~~No discount, settings or shipping writes~~ | **done** |
 | 14 | RLS ignores `staff_users.role` | A warehouse JWT reads `cost_price` and all PII |
 | 6 | Nothing marks a shipment delivered | Orders stay "shipped" permanently |
 
@@ -73,16 +73,46 @@ that were never built, and the seam that nothing tests.**
       Storage decision, `setup.md` C5), categories, collections, product
       relations, and delete/archive of a product.
 
-- [ ] **2. No discount or coupon management.** `checkout()` takes
-      `p_coupon_code` (`routes/checkout.ts:143`) and the schema carries the whole
-      `discounts` machinery with its race guard. Nothing creates a discount.
+- [x] **2. No discount or coupon management.** — **done**.
+      `POST`/`GET` `/admin/discounts`, `PATCH /admin/discounts/{id}`, reusing
+      `discountAdminSchema` — which, like the others, already existed with no
+      caller. `checkout()` has taken `p_coupon_code` since B5 and
+      `enforce_discount_limits()` has guarded the redemption race for three
+      phases; only the codes had to be inserted by hand.
+      *`used_count` is not writable, deliberately.* It moves in the same
+      transaction as the redemption row, and `discounts_within_max_uses` is
+      what actually stops a single-use code being claimed twice by concurrent
+      checkouts. An endpoint that could set it could hand out a spent code or
+      wind one back. There is a test that sends it and asserts the counter
+      stayed at zero.
+      *Withdrawal is `is_active: false`, not DELETE* — deleting a code takes
+      its redemption history with it, and that history is what explains a
+      discounted order months later.
 
-- [ ] **3. No `store_settings` surface.** GST seller details, the COD toggle,
-      the free-shipping threshold. `setup.md` Step 5 sets them by SQL once, at
-      install; an owner can never change them afterwards.
+- [x] **3. No `store_settings` surface.** — **done**. `GET /admin/settings`
+      and `PATCH /admin/settings` (owner/admin only).
+      *`seller_gstin` and `seller_state_code` are format-checked here, and must
+      agree with each other*, because nothing downstream catches them: the
+      invoice is issued, numbered gap-free, and is a legal document by the time
+      anyone notices the number on it is malformed. Verified audited — a
+      changed GSTIN lands in `audit_logs` with the staff member's id.
+      *`config` (jsonb) is deliberately not exposed.* Nothing in the service
+      reads it, and the README is explicit it is for non-secret configuration
+      only; an endpoint taking arbitrary JSON into it is an invitation to put a
+      gateway key there. Add it when something needs to read it.
 
-- [ ] **4. No shipping zone or rate management.** `/shipping/quote` reads the
-      rate tables. Nothing writes them — `setup.md` Step 6 is SQL.
+- [x] **4. No shipping zone or rate management.** — **done**. Zones, rate
+      bands and serviceable PIN codes: `/admin/shipping/zones`,
+      `/admin/shipping/rates`, `PUT /admin/shipping/pincodes/{pincode}`.
+      *The overlap rule stays the database's.* `rates_no_overlap` is a GiST
+      exclusion constraint — exactly one active rate may match any (zone,
+      weight, basket value) point — and `errors.ts` already knew it by name
+      before anything could provoke it. A straddling band is a 409 that does
+      not mention GiST; retiring the old band is what makes room, and the test
+      walks that whole sequence.
+      *An unlisted PIN code is unserviceable*, so `PUT` on one is the switch
+      that opens a new delivery area. Proven end to end: `/shipping/quote`
+      answers `serviceable: false` before and quotes the real rate after.
 
 - [x] **5. Failed webhook processing was never retried or surfaced.** — **done**,
       commit `1710849`.
@@ -286,9 +316,10 @@ that were never built, and the seam that nothing tests.**
 2. ~~**#7, #8, #9**~~ — done. The API can be deployed and redeployed without
    dropping traffic.
 3. ~~**#17**~~ — done, and before the catalog writes as planned.
-4. **#1–#4** — a lot of new SQL-touching code, and now there is something
-   that notices when it disagrees with the schema. Products and variants are
-   done; options, images, discounts, settings and shipping rates are not.
+4. ~~**#2–#4**~~ — done. **#1** remains part-done: products and variants can
+   be created and edited; options, option values, images, categories and
+   collections are still SQL. Images need the Storage decision
+   (`setup.md` C5) before they are worth building.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
 
 Both finished items took longer than the entry predicted, for the same reason:
