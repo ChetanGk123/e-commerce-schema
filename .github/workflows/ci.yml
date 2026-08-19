@@ -6,13 +6,15 @@ on:
   pull_request:
 
 jobs:
+  # Fast: no containers, no network. Fails in seconds when it fails.
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     env:
       # env.ts validates at import time and refuses to boot without these,
       # and importing the app is the first thing every test does. The
-      # values are fake on purpose: the suite reaches no network, so a
+      # values are fake on purpose: this job reaches no network, so a
       # real key here would buy nothing and leak something.
       SUPABASE_URL: http://localhost:54321
       SUPABASE_ANON_KEY: ci-not-a-real-key
@@ -36,3 +38,57 @@ jobs:
       - run: bun run typecheck
 
       - run: bun test
+
+  # Slow: Postgres and PostgREST in containers.
+  #
+  # A separate job rather than more steps, so it runs beside `check`
+  # instead of after it -- and so a red X says which kind of thing broke
+  # without opening the log.
+  #
+  # This is the half that was missing. `bun test` runs in process and
+  # reaches no database, so every question that needs one -- does RLS
+  # permit the select list this handler asks for, do checkout()'s
+  # parameter names still match what the route sends, does an error code
+  # still match the constraint that raises it -- went unasked in CI while
+  # the suites that ask them sat in the repo.
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - run: bun install --frozen-lockfile
+
+      # Applies every migration to a throwaway Postgres, then asserts the
+      # schema's invariants against it: the RLS policies, the ledger
+      # rules, the exclusion constraints. Nothing else in CI runs a
+      # migration at all.
+      - name: Schema invariants (make test)
+        run: make test
+
+      # The seam. PostgREST in front of the same database, with the API
+      # exercised over HTTP as it runs in production.
+      #
+      # A separate `make` invocation on purpose: `test` leaves its fixture
+      # rows behind and `test-api` seeds demo data over the top, so
+      # sharing one database would have them collide. Each target rebuilds
+      # the container from scratch, which is what makes either result mean
+      # anything.
+      - name: API <-> database seam (make test-api)
+        run: make test-api
+
+      # A stack that failed to start is the failure mode worth planning
+      # for, because its natural symptom is a suite that ran no tests.
+      # harness.ts now refuses to skip when the stack was configured, so
+      # this is here to say why it could not be reached.
+      - name: Container logs
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs ecomm-verify 2>&1 | tail -40 || true
+          docker logs ecomm-postgrest 2>&1 | tail -40 || true

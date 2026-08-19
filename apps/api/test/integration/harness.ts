@@ -19,15 +19,37 @@ import { SignJWT } from "jose";
 export const PGRST_URL = process.env.INTEGRATION_PGRST_URL;
 const SECRET = process.env.INTEGRATION_JWT_SECRET ?? "";
 
-/** True when `make test-api` set the stack up. */
+/**
+ * True when `make test-api` set the stack up.
+ *
+ * The skip exists for a laptop with no Docker: plain `bun test` should
+ * stay green there, because a suite that fails without containers gets
+ * deleted and then none of this is tested at all.
+ *
+ * But "no stack configured" and "the stack was configured and did not
+ * come up" are different, and only the first is a reason to skip. If
+ * `make test-api` asked for a stack and PostgREST cannot be reached,
+ * skipping turns a broken stack into a green run of eighty tests that
+ * never executed -- which is the exact shape of failure the rest of this
+ * repo keeps finding. So that one throws.
+ */
 export async function stackIsUp(): Promise<boolean> {
   if (!PGRST_URL || !SECRET) return false;
+
+  let reason: string;
   try {
-    const res = await fetch(PGRST_URL, { signal: AbortSignal.timeout(2_000) });
-    return res.ok;
-  } catch {
-    return false;
+    const res = await fetch(PGRST_URL, { signal: AbortSignal.timeout(5_000) });
+    if (res.ok) return true;
+    reason = `answered ${res.status}`;
+  } catch (err) {
+    reason = (err as Error).message;
   }
+
+  throw new Error(
+    `INTEGRATION_PGRST_URL is set to ${PGRST_URL} but PostgREST ${reason}. ` +
+      `The stack was asked for and did not come up; refusing to skip, because ` +
+      `a skipped suite here is indistinguishable from a passing one.`,
+  );
 }
 
 const key = () => new TextEncoder().encode(SECRET);
