@@ -13,6 +13,9 @@ import { app } from "../src/app";
 const doc = async () =>
   (await (await app.request("/openapi.json")).json()) as {
     paths: Record<string, Record<string, { security?: unknown[] }>>;
+    components: {
+      schemas: Record<string, { properties?: Record<string, unknown> }>;
+    };
   };
 
 const drain = (headers: Record<string, string> = {}) =>
@@ -49,5 +52,27 @@ describe("B11 the drain endpoint is not open", () => {
 
   test("outbox health is 401 without a token", async () => {
     expect((await app.request("/admin/outbox")).status).toBe(401);
+  });
+});
+
+/**
+ * The redrive itself needs a database to do anything, so what it does is
+ * asserted where a database exists. What is purely the API's -- and what
+ * was actually missing -- is that the queue is reachable at all: from the
+ * in-process loop, from an external scheduler, and from a staff screen.
+ */
+describe("failed webhooks are not a dead end", () => {
+  test("the drain reports the redrive, so a JOBS_INTERVAL_SECONDS=0 deployment gets it too", async () => {
+    // The whole reason the redrive rides on /jobs/drain rather than
+    // taking an endpoint of its own: a deployment that turned the
+    // in-process loop off has exactly one cron entry, and it points here.
+    const props = (await doc()).components.schemas.DrainResult?.properties;
+    expect(props).toBeDefined();
+    expect(props?.webhooks).toBeDefined();
+  });
+
+  test("webhook health is a staff screen", async () => {
+    expect((await app.request("/admin/webhooks")).status).toBe(401);
+    expect((await doc()).paths["/admin/webhooks"]?.get?.security).toBeDefined();
   });
 });

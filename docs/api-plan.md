@@ -480,6 +480,7 @@ section into marketing copy.
 - [x] **Outbox drain in the API**: claim → send → settle, with `FOR UPDATE SKIP LOCKED`
 - [x] Drain endpoint secret-guarded, **and** an interval loop in-process
 - [x] **Validate**: kill the mail provider → rows stay `queued`, nothing is lost; restore → they drain
+- [x] **Webhook redrive** — `redriveWebhooks()` beside the drain, and `GET /admin/webhooks` for what it gave up on. B6 deferred this here and nothing picked it up: `routes/webhooks.ts` recorded a failed capture, answered 200 and moved on, so a `payment.captured` that failed on a transient error left the customer charged and the order pending, permanently
 
 **Found here.** The outbox had a producer and no consumer. `checkout()` has
 queued an order confirmation for every order ever placed, and nothing read them:
@@ -502,6 +503,18 @@ would go out. Caught by the invariant, fixed with a `claimed_at` column.
 *`attempts` increments at claim time, not at failure.* A message that kills the
 process on every attempt would otherwise look untried forever, and that is
 exactly the message worth noticing.
+
+*The webhook redrive counts tries, not deliveries, for the same reason.* It
+re-records the delivery through `record_webhook()` rather than bumping a column,
+so `attempts` means "we tried" whether the caller was Razorpay redelivering or
+the job retrying. A gateway that gives up early does not leave us retrying
+forever, and an outage that stops us from trying at all does not burn the
+budget. Twenty attempts, then it goes quiet and `GET /admin/webhooks` names it.
+
+*The redrive rides on `POST /jobs/drain` instead of taking its own endpoint.*
+A deployment running `JOBS_INTERVAL_SECONDS=0` has one cron entry, pointed
+there. A second endpoint it was never told to call is a fix that misses the
+deployment most exposed to the bug.
 
 *With no provider the drain claims nothing.* Claiming would burn an attempt
 against a send that was never going to happen, and five passes later the row
@@ -896,7 +909,7 @@ admin's read-only screens.
 | B8 Returns & money | **done** | `20260801001700_returns_wallet.sql` |
 | B9 Invoicing | **done** | `20260801001800_invoicing.sql` |
 | B10 Customers & support | **done** | `20260801001900_support.sql`; closes a live erasure hole |
-| B11 Jobs | **done** | `20260801002000_jobs.sql`; outbox drain + pg_cron fallback |
+| B11 Jobs | **done** | `20260801002000_jobs.sql`; outbox drain + pg_cron fallback + webhook redrive |
 | B12 Cross-cutting | **done** | CORS closed by default, rate limits, `@ecom/client` |
 | B13 Realtime | scope-guarded | Supabase Realtime unless a screen demands more |
 | B14 Orders | **done** | order reads + the two B3 RPCs nothing called; guest tracking still open |

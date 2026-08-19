@@ -40,7 +40,7 @@ interface RecordResult {
 }
 
 /** Only what we read. Razorpay sends a great deal more. */
-interface PaymentEntity {
+export interface PaymentEntity {
   id?: string;
   /** The GATEWAY order id, which is what we stored in payments.provider_ref. */
   order_id?: string;
@@ -50,7 +50,7 @@ interface PaymentEntity {
   error_reason?: string;
 }
 
-interface RazorpayEvent {
+export interface RazorpayEvent {
   event?: string;
   payload?: { payment?: { entity?: PaymentEntity } };
 }
@@ -159,7 +159,7 @@ export const webhooksRoute = new OpenAPIHono({
   }
 
   try {
-    await process(db, event, entity);
+    await processEvent(db, event, entity);
     const done = await db.rpc("mark_webhook_processed", { p_id: row.id });
     throwOnDbError(done.error);
     log?.info({ eventId, type: event.event }, "webhook.processed");
@@ -203,7 +203,19 @@ async function resolveOrder(
   return (data as { order_id: string }).order_id;
 }
 
-async function process(
+/**
+ * What a delivery means, applied.
+ *
+ * Exported because jobs.ts replays the stored payload of a delivery that
+ * failed here. One switch, two callers -- a second copy in the redrive
+ * would drift the moment an event type is added, and the drift would
+ * show up as a retry that quietly does nothing.
+ *
+ * Throws on anything it could not apply. The caller decides what that
+ * means: the route records the reason and still answers 200, the redrive
+ * records it and tries again later.
+ */
+export async function processEvent(
   db: ReturnType<typeof serviceClient>,
   event: RazorpayEvent,
   entity: PaymentEntity | undefined,
