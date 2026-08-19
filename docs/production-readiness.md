@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #5 and #10 done; the rest open
+**Status**: #5, #8, #9, #10 done; the rest open
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -35,8 +35,8 @@ that were never built, and the seam that nothing tests.**
 | ~~5~~ | ~~Failed webhooks never retried or surfaced~~ | **done** |
 | ~~10~~ | ~~No timeout on Supabase calls~~ | **done** |
 | 7 | No Dockerfile, no CI | Cannot deploy at all |
-| 8 | No graceful shutdown | Every redeploy kills in-flight checkouts |
-| 9 | No readiness probe | A misconfigured instance takes traffic and 500s |
+| ~~8~~ | ~~No graceful shutdown~~ | **done** |
+| ~~9~~ | ~~No readiness probe~~ | **done** |
 | 17 | No integration tests | Both suites stay green while the system is broken |
 | 1–4 | No catalog, discount, settings or shipping writes | The store can only be run by hand in SQL |
 | 14 | RLS ignores `staff_users.role` | A warehouse JWT reads `cost_price` and all PII |
@@ -101,18 +101,38 @@ that were never built, and the seam that nothing tests.**
       Nixpacks config, no CI workflow anywhere in the repo. The plan's own
       `turbo prune`-on-Bun risk is still unverified.
 
-- [ ] **8. No graceful shutdown.** `stopJobs()` (`src/jobs.ts:293`) is exported
-      and called by nobody, and there is no `SIGTERM` handler in the process.
-      A redeploy drops in-flight requests mid-checkout. A drain interrupted
-      mid-send leaves rows in `sending`, which `requeue_stalled_messages()`
-      rescues ten minutes later — so mail is delayed, not lost, but the
-      request-side loss is real.
+- [x] **8. Nothing handled a shutdown signal.** — **done**, together with #9;
+      the two only work as a pair.
+      *The gap:* `stopJobs()` was exported and called by nobody, and no signal
+      handler existed. A redeploy dropped whatever was in flight — a checkout
+      mid-transaction, a drain mid-send. The database survived both, but the
+      customer saw a failed request for an order that may or may not exist.
+      *The fix:* `src/server.ts` now uses an explicit `Bun.serve` handle and
+      stops in an order that loses nothing — fail readiness, stop scheduling
+      jobs, keep serving through a 5s grace so whatever routes here notices,
+      then `server.stop()` (which waits for in-flight connections) behind a
+      `REQUEST_TIMEOUT_MS + 5s` backstop.
+      *Measured:* SIGTERM at t+301ms on a request with 7.7s left to run — the
+      request was **answered at t+8002ms** and the process exited 0. Readiness
+      flipped to 503 within 200ms of the signal while liveness stayed 200
+      throughout, which is the ordering that makes the drain invisible to
+      users rather than a wall of connection errors.
 
-- [ ] **9. Readiness probe.** `routes/health.ts` deliberately does not touch
-      Postgres, which is right for liveness, and its own comment says readiness
-      "arrives with B1". B1 shipped without it. An instance holding a wrong
-      `SUPABASE_URL`, or pointed at a dead Kong, passes its health check and
-      500s every request it is handed.
+- [x] **9. There was no readiness probe.** — **done**.
+      *The gap:* `/health` is liveness-only, correctly, and its own comment said
+      readiness "arrives with B1". B1 shipped without it, so an instance holding
+      a wrong `SUPABASE_URL` or pointed at a dead Kong passed its health check
+      and 500'd every request it was handed.
+      *The fix:* `GET /health/ready` reads one row through the **anon** client —
+      the whole path a storefront request takes, Kong through RLS, not just "the
+      process is running". A probe on the service key would pass while every
+      customer request failed.
+      *Its own deadline:* 2s, via `.abortSignal()`, which beats the 10s
+      client-wide one — measured at 2008ms against an unreachable database.
+      That composition is only possible because `withDeadline` keeps whichever
+      signal fires first rather than replacing the caller's.
+      *Point liveness at `/health` and readiness at `/health/ready`.* Swapped,
+      a brief database blip becomes a restart loop.
 
 - [x] **10. Nothing bounded how long a call to Supabase could take.** — **done**,
       branch `harden/supabase-timeouts`. Needed two layers, not the one this
@@ -206,8 +226,11 @@ that were never built, and the seam that nothing tests.**
 ## Order to do it in
 
 1. ~~**#5 and #10**~~ — done. Both lost money, both were small.
-2. **#7, #8, #9** — until these exist there is nothing to deploy. #8 and #9 are
-   an hour each; #7 is the one with an unknown in it (`turbo prune` on Bun).
+2. ~~**#8, #9**~~ — done, and they had to be done together: a shutdown that
+   does not fail readiness first is just a faster way to drop traffic.
+   **#7** is what is left before anything can deploy, and it is the one with an
+   unknown in it (`turbo prune` on Bun). Its `HEALTHCHECK` now has a real
+   endpoint to point at.
 3. **#17** — before any of the catalog writes.
 4. **#1–#4** — a lot of new SQL-touching code, which is precisely why #17 comes first.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
