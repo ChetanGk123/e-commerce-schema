@@ -52,26 +52,58 @@ exercised.
 
 ## Getting a token
 
-Swagger's **Authorize** box wants a JWT, not a password. GoTrue issues one:
+Swagger's **Authorize** box wants a JWT, not a password. Run one of these —
+each prints a token and nothing else, ready to paste into
+`http://localhost:3001/docs`.
+
+These go through the API's own `POST /auth/sign-in` (api-plan B16), not
+Supabase Auth directly: the browser no longer holds the anon key, so neither
+should the thing you use to imitate it. **The API must be running.**
+
+`staff@test.local` — owner, full admin:
 
 ```sh
-# ANON_KEY is SUPABASE_ANON_KEY from apps/api/.env
-export SUPABASE_URL=http://localhost:8000
-export ANON_KEY=...
-
-export TOKEN=$(curl -s "$SUPABASE_URL/auth/v1/token?grant_type=password" \
-  -H "apikey: $ANON_KEY" -H 'Content-Type: application/json' \
-  -d '{"email":"staff@test.local","password":"DevPassw0rd!"}' \
-  | jq -r .access_token)
-
-curl -s -H "Authorization: Bearer $TOKEN" localhost:3001/me | jq
+curl -s http://localhost:3001/auth/sign-in \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"staff@test.local","password":"DevPassw0rd!"}' | jq -r .accessToken
 ```
 
-Paste the `access_token` into Swagger's Authorize box **without** the word
-`Bearer` — the UI adds it.
+`warehouse@test.local` — staff, but cannot erase:
+
+```sh
+curl -s http://localhost:3001/auth/sign-in \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"warehouse@test.local","password":"DevPassw0rd!"}' | jq -r .accessToken
+```
+
+`shopper2@test.local` — customer surface:
+
+```sh
+curl -s http://localhost:3001/auth/sign-in \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"shopper2@test.local","password":"DevPassw0rd!"}' | jq -r .accessToken
+```
+
+`staff2@test.local` — both:
+
+```sh
+curl -s http://localhost:3001/auth/sign-in \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"staff2@test.local","password":"DevPassw0rd!"}' | jq -r .accessToken
+```
+
+Paste the output into Authorize **without** the word `Bearer` — the UI adds it.
+Append `| pbcopy` to any of them to skip the copying.
 
 Tokens last **one hour**. A sudden wall of 401s across every endpoint almost
 always means yours expired, not that something broke.
+
+**Failed to fetch** in Swagger is not a CORS problem, whatever the message
+says — it is what the UI shows for any network failure, and the usual cause is
+that the API is not running. Check `curl localhost:3001/health` first, then
+start it with `bun run dev` from `apps/api`. Open the docs on
+`localhost:3001`, not `127.0.0.1:3001`: those are different origins to a
+browser, and only same-origin requests skip the CORS allowlist.
 
 ---
 

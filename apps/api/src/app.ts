@@ -12,8 +12,10 @@ import { validationHook } from "./schemas";
 import { adminCatalogRoute } from "./routes/admin-catalog";
 import { cartRoute } from "./routes/cart";
 import { accountRoute } from "./routes/account";
+import { authRoute } from "./routes/auth";
 import { catalogRoute } from "./routes/catalog";
 import { checkoutRoute } from "./routes/checkout";
+import { emailTemplatesRoute } from "./routes/email-templates";
 import { engagementRoute } from "./routes/engagement";
 import { fulfilmentRoute } from "./routes/fulfilment";
 import { healthRoute } from "./routes/health";
@@ -21,9 +23,11 @@ import { inventoryRoute } from "./routes/inventory";
 import { invoicingRoute } from "./routes/invoicing";
 import { jobsRoute } from "./routes/jobs";
 import { meRoute } from "./routes/me";
+import { ordersRoute } from "./routes/orders";
 import { paymentsRoute } from "./routes/payments";
 import { returnsRoute } from "./routes/returns";
 import { shippingRoute } from "./routes/shipping";
+import { staffRoute } from "./routes/staff";
 import { supportRoute } from "./routes/support";
 import { walletRoute } from "./routes/wallet";
 import { webhooksRoute } from "./routes/webhooks";
@@ -89,6 +93,13 @@ app.use("*", bodyLimit({ maxSize: env.MAX_BODY_KB * 1024 }));
  * attempt reserves stock and talks to a gateway, so ten of them should
  * exhaust an allowance that a hundred product views would not.
  */
+// Sign-in is where a password list gets pointed. The budget is 60/min,
+// so cost 10 allows six attempts a minute from one address; sign-up and
+// the reset mail cost more because each one has a side effect elsewhere.
+app.use("/auth/sign-in", rateLimit(10));
+app.use("/auth/sign-up", rateLimit(15));
+app.use("/auth/password/forgot", rateLimit(20));
+app.use("/auth/password/change", rateLimit(10));
 app.use("/checkout", rateLimit(6));
 app.use("/cart/*", rateLimit(1));
 app.use("/enquiries", rateLimit(6));
@@ -103,12 +114,16 @@ app.use("/payments/*", rateLimit(6));
 // AppType, so hc<AppType> in the front ends knows about each one.
 const routes = app
   .route("/", healthRoute)
+  .route("/", authRoute)
   .route("/", meRoute)
+  .route("/", staffRoute)
+  .route("/", emailTemplatesRoute)
   .route("/", catalogRoute)
   .route("/", adminCatalogRoute)
   .route("/", shippingRoute)
   .route("/", cartRoute)
   .route("/", checkoutRoute)
+  .route("/", ordersRoute)
   .route("/", paymentsRoute)
   .route("/", webhooksRoute)
   .route("/", inventoryRoute)
@@ -133,7 +148,7 @@ app.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   scheme: "bearer",
   bearerFormat: "JWT",
   description:
-    "A Supabase access token. Get one from GoTrue: POST {SUPABASE_URL}/auth/v1/token?grant_type=password with the apikey header set to the anon key. Paste the access_token here, without the word Bearer.",
+    "An access token from POST /auth/sign-in. Paste the accessToken here, without the word Bearer. Browsers do not talk to Supabase Auth directly any more -- this service owns the whole auth surface, so it is the one place rate limiting and audit see a sign-in.",
 });
 
 app.doc("/openapi.json", {

@@ -160,7 +160,7 @@ no stock field.
 ## Phase 1 — Auth, shell, role guard · Medium
 
 - [ ] `proxy.ts` (Next 16's middleware): refresh session, redirect to `/login`
-- [ ] `src/lib/supabase/server.ts` — cookie-bound `createServerClient`, **httpOnly**, `cookieOptions.name = "sb-admin"`. **Session only — never used to query data**
+- [ ] ~~`src/lib/supabase/server.ts` — cookie-bound `createServerClient`~~ — **superseded by api-plan B16.** The admin has no Supabase client at all now: it posts credentials to `POST /auth/sign-in` and stores the returned session in an **httpOnly** cookie it sets itself (`sb-admin`), refreshing through `POST /auth/refresh`. No `NEXT_PUBLIC_SUPABASE_*` in this app
 - [ ] `src/lib/api.ts` — `hc` client from api-plan B12, with the session JWT attached as `Authorization: Bearer`
 - [ ] `src/lib/auth.ts` — `getStaff()` (per-request cached, from the API's `/me`), `requireRole([...])` for nav and page gating
 - [ ] Shell: sidebar + header; nav as typed data in `src/navigation/sidebar/sidebar-items.ts`, filtered by role

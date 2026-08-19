@@ -8,6 +8,17 @@ import { z } from "zod";
  * never the public https://supabase.<domain> the browsers use. Mixing the two
  * produces failures that read like auth errors.
  */
+/**
+ * An emptied-out variable means "not set", not "set to nothing".
+ *
+ * Switching providers is done by blanking the old credentials, and
+ * `RESEND_API_KEY=` failing `.min(1)` would crash the process on boot
+ * during exactly that migration. Treating blank as absent is what makes
+ * the swap a one-line edit.
+ */
+const blankAsUnset = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), schema);
+
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3001),
@@ -41,8 +52,33 @@ const schema = z.object({
    * behaviour for a store whose mail is not wired up yet -- and exactly
    * what the drain does when the provider is merely down.
    */
-  RESEND_API_KEY: z.string().min(1).optional(),
-  MAIL_FROM: z.string().email().optional(),
+  /**
+   * Which provider actually sends. Leave unset and it is inferred from
+   * whichever credentials are present, so an existing deployment keeps
+   * working untouched; set it to pin the choice when both are configured.
+   */
+  MAIL_PROVIDER: blankAsUnset(z.enum(["resend", "smtp"]).optional()),
+  MAIL_FROM: blankAsUnset(z.string().email().optional()),
+
+  // Resend: one HTTP POST, no SDK.
+  RESEND_API_KEY: blankAsUnset(z.string().min(1).optional()),
+
+  // SMTP: Gmail, Zoho, Fastmail, SES, Mailgun, Postmark, SendGrid --
+  // they all speak it, so one adapter covers every provider worth naming.
+  // Gmail wants an App Password, not the account password, and 2FA on.
+  SMTP_HOST: blankAsUnset(z.string().min(1).optional()),
+  SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(587),
+  SMTP_USER: blankAsUnset(z.string().min(1).optional()),
+  SMTP_PASS: blankAsUnset(z.string().min(1).optional()),
+  /**
+   * True for implicit TLS on 465. Leave false for 587, where the
+   * connection starts plaintext and upgrades with STARTTLS -- which is
+   * what Gmail, Zoho and SES expect. False does NOT mean unencrypted.
+   */
+  SMTP_SECURE: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   /** Guards POST /jobs/drain. Without it the endpoint refuses everyone. */
   JOBS_SECRET: z.string().min(16).optional(),
   /**

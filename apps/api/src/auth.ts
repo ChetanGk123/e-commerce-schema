@@ -94,6 +94,12 @@ async function establish(c: Context, token: string): Promise<void> {
 }
 
 /**
+ * Every staff refusal, whatever the cause. A constant rather than two
+ * literals so the two branches below cannot drift apart again.
+ */
+const STAFF_REFUSED = "Staff access required";
+
+/**
  * 403: we know who you are, and it is not staff.
  *
  * A customer's token is perfectly valid auth -- the missing staff_users row is
@@ -114,13 +120,35 @@ export const requireStaff = createMiddleware(async (c, next) => {
     log?.error({ err: error.message }, "auth.staff_lookup_failed");
     throw new HTTPException(500, { message: "Could not resolve staff account" });
   }
+  // One message for both refusals, for the same reason every 401 shares
+  // one: which of the two fires depends on RLS state rather than on
+  // anything the caller should learn, and the log already carries the
+  // difference for whoever has to explain it to the person locked out.
   if (!data) {
     log?.warn({ userId: caller.userId }, "auth.not_staff");
-    throw new HTTPException(403, { message: "Staff access required" });
+    throw new HTTPException(403, { message: STAFF_REFUSED });
   }
+  /**
+   * Redundant today, and deliberately kept.
+   *
+   * `staff_all` is the only policy on `staff_users` and it is gated on
+   * `is_staff()`, which itself requires `is_active` -- so a deactivated
+   * member cannot see their own row, and the lookup above has already
+   * returned null. Verified against the live stack: deactivating an
+   * account cut off its still-valid JWT on the next request, through the
+   * `!data` branch, never this one.
+   *
+   * It stays because that redundancy is an accident of the current
+   * policy set, not a property of the schema. B11 replaces `staff_all`
+   * with a per-role matrix, and a matrix that lets a staff member read
+   * their own row -- an ordinary thing to want -- would make this check
+   * the only thing between a deactivated account and the admin surface.
+   * Deleting it as dead code would turn that into a silent privilege
+   * grant, and nothing here would fail to say so.
+   */
   if (!data.is_active) {
     log?.warn({ userId: caller.userId }, "auth.staff_inactive");
-    throw new HTTPException(403, { message: "This staff account is disabled" });
+    throw new HTTPException(403, { message: STAFF_REFUSED });
   }
 
   caller.staff = {

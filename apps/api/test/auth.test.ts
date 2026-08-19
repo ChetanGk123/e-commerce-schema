@@ -69,3 +69,37 @@ describe("B1 auth — 401 is 'who are you', 403 is 'not you'", () => {
     expect(new Set(messages).size).toBe(1);
   });
 });
+
+describe("403 responses never say why either", () => {
+  /**
+   * requireStaff refuses on two branches: no `staff_users` row, and a row
+   * with `is_active = false`. Which one fires is decided by RLS -- today
+   * `staff_all` is gated on `is_staff()`, so a deactivated member cannot
+   * see their own row and only the first branch is ever reached.
+   *
+   * That is an accident of the current policy set. B11 replaces it, and
+   * the second branch may start firing. This pins the thing that must not
+   * change when it does: the caller gets the same sentence either way.
+   * Reaching both branches for real needs a database, so the invariant is
+   * checked at the source.
+   */
+  const source = () => Bun.file(new URL("../src/auth.ts", import.meta.url)).text();
+
+  test("both staff refusals throw the same message", async () => {
+    const text = await source();
+    const messages = [...text.matchAll(/HTTPException\(403,\s*\{\s*message:\s*([^,\n}]+)/g)].map(
+      (m) => m[1]!.trim(),
+    );
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    // A bare string literal creeping back into either branch is exactly
+    // the drift this catches.
+    expect(messages.filter((m) => m === "STAFF_REFUSED").length).toBe(2);
+  });
+
+  test("the is_active guard is still there", async () => {
+    // Redundant under today's RLS, load-bearing the moment a role matrix
+    // lets a staff member read their own row. Deleting it as dead code
+    // would silently let deactivated accounts back in.
+    expect(await source()).toContain("!data.is_active");
+  });
+});

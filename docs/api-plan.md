@@ -4,7 +4,7 @@ Shared HTTP backend for the admin and storefront apps. Tick boxes as work lands,
 **Status** and the Progress table at the bottom. Anything discovered mid-build that
 contradicts this file: fix the file, don't work around it.
 
-**Status**: `B0-B12 done (bar courier/messaging webhooks), B13 scope-guarded`
+**Status**: `B0-B12 + B14-B18 done (bar courier/messaging webhooks), B13 scope-guarded`
 **Created**: 2026-08-17
 **Complexity**: Large (~3.5 weeks before the admin UI has an API to call)
 **Built before**: `docs/admin-plan.md` — see [Supersedes](#supersedes-in-admin-planmd)
@@ -19,7 +19,7 @@ storefront become presentation layers that call it over HTTP. Background jobs st
 which needs network I/O and therefore lives here.
 
 ```
-browser ──▶ Supabase Auth ──────────────▶ session JWT
+browser ──▶ apps/api /auth/* ──▶ Supabase Auth ──▶ session JWT
 browser ──Bearer──▶ apps/api ──same JWT──▶ PostgREST ──▶ RLS + auth.uid()
                         └────service key──▶ checkout, payment capture,
                                             webhooks, staff creation
@@ -87,7 +87,7 @@ available if B13 ever needs them.
 | Backend shape | **Standalone API service** (`apps/api`) | Chosen deliberately over a shared package: one place to rate-limit and audit, and any client in any language can call it |
 | Jobs | **pg_cron**, per `docs/setup.md:238` | Already written in `supabase/jobs/retention.sql`; runs even if every app is down |
 | Outbox drain | **In the API** | pg_cron cannot make HTTP calls, so it cannot reach Resend/MSG91 |
-| Who talks to Postgres | **Only the API** | The browser keeps supabase-js solely to obtain a session |
+| Who talks to Supabase | **Only the API** | Auth included. `/auth/*` proxies GoTrue, so the browser needs neither supabase-js nor the anon key |
 
 ### Stack
 
@@ -570,6 +570,269 @@ to build neither.
 - [ ] **Known deviation**: browser-direct Realtime reopens a browser↔Supabase path, partially bypassing "one place to rate-limit and audit". Accepted for read-only, RLS-gated event delivery
 - [ ] **Scaling**: Postgres Changes filters per connection. A dozen staff is fine; thousands of customers each watching their own order is not — poll the tracking page every 30s instead
 
+### B14 — Orders · Medium · *not in the original plan*
+
+- [x] `GET /orders`, `GET /orders/{id}` — the customer's own, with the `order_events` timeline
+- [x] `GET /admin/orders`, `GET /admin/orders/{id}` — the console admin-plan Phase 4 calls "the core"
+- [x] `POST /admin/orders/{id}/capture-cod` → `admin_capture_cod`
+- [x] `POST /admin/orders/{id}/cancel` → `admin_cancel_order`
+- [x] **Validate**: a staff caller gets 0 from `/orders`, not the store's 9; a foreign order is 404; the cancellation note reaches staff and not the customer
+
+**Found here.** No phase owned reading an order. Every phase from B6 on could *act*
+on one — invoice it, ship it, refund it — and `orders` was read in exactly one
+place in the service (a guest lookup in `payments.ts`). Both "my orders" and the
+admin console had nothing to call, and the indexes built for them
+(`idx_orders_open`, `idx_orders_placed`, `idx_orders_email`) had no caller.
+
+Two B3 RPCs were in the same position: `admin_capture_cod` and
+`admin_cancel_order` were written, granted and covered by SQL tests, and no
+route reached either. So COD orders — the common payment method in this market —
+could not be marked paid at all, and the only immediate reservation release B6
+names was unreachable.
+
+`errors.ts` already carried `order_not_cancellable` and `order_not_pending`.
+Those rules were written in B9 for functions nothing called.
+
+**Decided here.**
+
+*Two order shapes, not one with nullable fields.* `risk_score`, `risk_flags`,
+the UTM columns and `customer_id` are absent from the customer projection
+itself, not stripped while shaping — the database never sends them to a handler
+that could leak them.
+
+*`order_events.note` is admin-only.* Unlike `ticket_messages` it has no
+`is_internal` column, so the schema never decided the question; a cancellation
+reason reading "suspected fraud, third RTO" would otherwise land in the
+customer's own timeline. Verified live: staff see the note, the customer sees
+that the status changed.
+
+*Scoped in the query, not by RLS* — the rule `fdfbe8d` established. A staff
+caller with no `customers` row gets 0 orders rather than all 9.
+
+*Capture takes an Idempotency-Key; cancel does not.* Capture books money and a
+stock sale, so a double-click must replay rather than re-run. Cancel's status
+check makes a second attempt a 409 that says why, which is the more useful
+answer.
+
+*No payment-provider filter on the console.* It needs an inner join on
+`payments`, which silently drops every order with no payment row — exactly the
+ones someone filtering by payment is hunting for.
+
+**Not built**: guest order tracking. A guest order has no `customer_id`, so
+`/orders` cannot reach it and an unauthenticated lookup needs a signed link or
+an emailed token — a scheme worth designing rather than inventing. Storefront
+S4 needs it before launch.
+
+### B15 — Staff accounts · Low · *the fourth service-key path*
+
+- [x] `POST /admin/staff` — auth user on the service key, `staff_users` row as the calling owner
+- [x] `GET /admin/staff` — the Phase 9 list, `include_inactive` off by default
+- [x] `PATCH /admin/staff/{id}` — role, `is_active`, name
+- [x] **Validate**: a warehouse account gets 403 from all three; a created account signs in, resolves through `/me`, and is refused an owner-only route; deactivation cuts off a still-valid JWT on the next request
+
+**Found here.** The service key had four documented jobs and only three routes.
+`staff_users.id` is `auth.users.id` with no default and — unlike `customers`,
+which `handle_new_user()` fills in — no trigger behind it, so a staff account
+needs the auth user and the row written together. Nothing did that, so there was
+no supported way to create a staff member at all; the existing accounts were made
+by hand. `requireRole` had been sitting in `auth.ts` since B1 with no caller.
+
+**Decided here.**
+
+*The owner check means different things on different routes, and the file says
+so.* On create it is a real boundary: minting an auth user needs the service
+key, which no staff JWT can reach. On read and update it is UX — `staff_all`
+covers `staff_users` like every other table, so any active staff member can
+already write it through PostgREST. Calling both "security" would be the
+mistake B11 exists to fix.
+
+*The row insert runs as the caller, not on the service key.* `staff_users`
+carries an audit trigger, and `audit_row()` reads `auth.uid()` — on the service
+key the record of who granted admin access would say nobody did. Proven live:
+`audit_logs.staff_id` came back as the calling owner's uid.
+
+*A password is set, not an invite emailed.* The mail path here is optional and
+unproven (B11 drained the outbox against a real 401 from Resend); an invite that
+never arrives is a staff member who cannot sign in with nothing to show for it.
+`email_confirm` is set for the same reason.
+
+*No rollback if the row insert fails after the auth user exists.* It would not
+work — `handle_new_user()` has already written a `customers` row and
+`customers.id` is ON DELETE RESTRICT — and it is not needed: an auth user with
+no `staff_users` row is exactly a shopper account, which is what every signup
+starts as. It is logged, because the email is now taken.
+
+*An owner cannot edit their own row.* That one rule is also what makes lockout
+impossible: no owner can demote or deactivate themselves, so at least one active
+owner always survives. No "count the owners" query needed.
+
+*Deactivation is the delete.* `audit_logs.staff_id` and
+`inventory_movements.created_by` reference these rows.
+
+**Not built**: promoting an existing customer account to staff. `createUser`
+refuses the duplicate email with a 409 that says so. It needs a lookup by email
+that the admin API does not offer directly — worth doing deliberately rather
+than guessing at.
+
+### B16 — Auth surface · Medium · *reverses a B0 decision*
+
+- [x] `POST /auth/sign-up` · `sign-in` · `refresh` · `sign-out`
+- [x] `POST /auth/password/forgot` · `password/change`
+- [x] Rate limits: sign-in 10, sign-up 15, reset mail 20, password change 10
+- [x] **Validate**: a wrong password and an unknown email answer identically; the issued token works on `/orders`; sign-out kills the refresh token; a password change invalidates the old password
+
+**The decision that changed.** B0 had the browser talk to Supabase Auth
+directly and reserved this service for everything else. That was wrong for the
+reason this service exists: *one place to rate-limit and audit*. An auth path
+that goes around the API cannot be rate-limited here, cannot consult the
+blocklist, and answers in a second error envelope no client can branch on.
+Sign-in is the single most attacked endpoint a store has, and it was the one
+endpoint we had no way to see.
+
+The browser now holds no Supabase credentials at all — no anon key, no
+`NEXT_PUBLIC_SUPABASE_URL`, no supabase-js.
+
+**Decided here.**
+
+*A proxy, not a reimplementation.* Every handler forwards to GoTrue's REST API
+and maps the answer into this service's envelope. GoTrue keeps owning sessions,
+token rotation and password hashing. Rewriting any of that would be strictly
+worse than what it replaced.
+
+*Tokens come back in the body, not as `Set-Cookie`.* This service is consumed by
+browsers and by anything else that speaks HTTP, so it stays stateless and
+framework-neutral; the browser client puts the session in an httpOnly cookie
+server-side. Never localStorage.
+
+*Sign-in gives nothing away; sign-up does, deliberately.* A wrong password and an
+unknown email are one message, verified identical. Sign-up says when an address
+is taken — that is an enumeration oracle and it is the right trade, because the
+alternative is a silent fake success and, on a store whose mail path is unproven
+(B11), a shopper who cannot sign in and is told nothing. `password/forgot`
+always answers 202, since there is nothing an honest caller would do
+differently.
+
+*Sign-out revokes the refresh token, and says so.* The access token already
+issued stays valid until it expires — it is a signed bearer token and nothing
+can recall it. Short lifetimes bound the window; pretending otherwise would be
+the lie.
+
+*`/auth/refresh` is not rate-limited.* Refresh tokens are long and random, so
+there is nothing to brute-force, and a legitimate client calls it on a timer.
+
+**Not built**: OAuth and magic links. Both are redirect flows whose callback
+would have to land somewhere and be exchanged, which is a design rather than a
+proxy. Email confirmation is handled — sign-up answers 202 with
+`confirmationRequired` when the project demands it.
+
+### B17 — Email, ours end to end · Medium
+
+- [x] `admin/generate_link` mints the code; **GoTrue never sends anything**
+- [x] `password/forgot` queues to `message_log`; `POST /auth/password/reset` spends the code
+- [x] `POST /auth/verify` (signup · email change · invite) and `POST /auth/email/change`
+- [x] Templates for all four auth mails, beside `order_confirmation`
+- [x] **Configurable provider**: `MAIL_PROVIDER=resend|smtp`, inferred when unset
+- [x] **Validate**: a real SMTP conversation delivered the code; the same build on Resend requeued it instead; forgot → drain → reset → signed in
+
+**Found here, and it was live.** GoTrue could not send email at all. The Dokploy
+template points SMTP at a `supabase-mail` host that is not in the compose file,
+so `POST /auth/v1/recover` answers **500 "Error sending recovery email"** — and
+B16's `/auth/password/forgot`, which answers 202 either way so as not to leak
+who has an account, was faithfully reporting success for a reset that never
+happened. Password reset had never worked.
+
+**Decided here.**
+
+*GoTrue mints the code and is told nothing about delivery.*
+`admin/generate_link` returns an OTP and a link without sending. The code goes
+into `message_log` and leaves through the B11 drain — one queue, one retry
+policy, one place a stuck message is visible. Two mail paths meant two places
+for a failure to hide, and the one that hid was the one nobody could see.
+
+*We send the OTP, never the `action_link`.* That link points at
+`http://kong:8000`, the internal URL, unreachable from a customer's laptop.
+Rewriting it to the public host would work and would put a Supabase URL in front
+of shoppers, reopening the browser-to-Supabase path B16 closed. Six digits
+travel better, and the reset lands them signed in.
+
+*One SMTP adapter, not four HTTP ones.* Gmail, Zoho, Fastmail, SES, Mailgun,
+Postmark and SendGrid all speak SMTP, so supporting "another provider" is an
+`.env` edit rather than a new file. Resend keeps its own adapter because it is a
+single POST and was already there.
+
+*nodemailer earns its dependency.* AUTH, STARTTLS, MIME encoding, dot-stuffing
+and header folding are a lot of ways to be quietly wrong. Spiked under Bun
+first, as B0 did for Razorpay: it compiles a correct message and its socket
+failures are clean.
+
+*A blank variable means unset.* Switching providers is done by emptying the old
+credentials, and `RESEND_API_KEY=` failing `.min(1)` would crash the process on
+boot during exactly that migration.
+
+**Not verified**: delivery through a real provider account. There are no
+credentials here — the Resend key is a placeholder and returns 401. What is
+proven is the whole path either side of that: a real SMTP server received the
+message, subject and code intact, and the row went to `sent` with the
+provider's message id; on Resend the same message requeued with the reason and
+nothing was lost.
+
+**Still open**: sign-up confirmation is wired and templated but not switched on.
+`GOTRUE_MAILER_AUTOCONFIRM=true` still short-circuits it, which is the right
+default until a provider account exists — turning it on before mail works would
+lock every new shopper out of the account they just made.
+
+### B18 — Email template manager · Medium
+
+- [x] `message_templates` (`20260801002100_message_templates.sql`) — overrides only, no seed rows
+- [x] `GET/PUT/DELETE /admin/email-templates/{key}` + `POST .../preview`
+- [x] Built-in catalogue in `mailer.ts` with per-key `required` variables
+- [x] **Validate**: a customised reset arrived at a real SMTP server with the code in it; a template written straight into the table without `{{code}}` still sent the built-in
+
+**Decided here.**
+
+*The table only ever overrides.* There are no seed rows, and a key with no
+row renders from `mailer.ts`. That single choice is what makes a fresh install
+send correct email before anyone opens the admin, makes DELETE a working
+"revert", and makes it impossible to end up with no template at all. The API
+refuses to create a key it cannot send, so the catalogue stays closed.
+
+*Templates live in the database, not at the provider.* `mailer.ts` had proposed
+provider-side templates. B17 made the provider swappable, and copy held at
+Resend would have to be re-authored on a move to SMTP — which is the lock-in
+that work removed.
+
+*A required variable is enforced twice, deliberately.* The API refuses to save a
+`password_reset` with no `{{code}}` and names the variable; the renderer
+independently ignores such an override and sends the built-in. The second is not
+redundant — `staff_all` lets any staff member write the table through PostgREST,
+and a reset email with no code is worse than none, because the customer cannot
+tell it was broken rather than late. Proven by poisoning the row directly: the
+built-in went out, code intact.
+
+*The subject is one header line, and the database says so.* A newline there
+appends headers — `Bcc` most obviously — to every message the template sends.
+The CHECK refuses it for every caller including the service key, so the
+guarantee does not depend on which mail adapter is selected; the renderer strips
+again at the last line before the header is written.
+
+*Substitution, not evaluation.* `{{snake_case}}` and nothing else: no
+conditionals, no property access, no engine. Staff-editable content run through
+a template engine is a code-execution surface, and none of these emails need
+one. An unknown variable renders empty, so a template naming something that no
+longer exists reads plain rather than broken.
+
+*Preview renders a draft without saving it.* The alternative is saving it and
+finding out from a customer.
+
+**Ceiling**: the override cache is per-process with a 60-second TTL, so two
+instances can disagree for up to a minute after an edit. A NOTIFY listener is
+the upgrade if that ever matters.
+
+**Not built**: HTML email. Everything is `text/plain`, which is what the mailer
+already sent. HTML would bring a sanitiser and an XSS-in-inbox surface for
+staff-authored content, and is worth doing deliberately rather than by
+accident.
+
 ---
 
 ## Risks
@@ -586,7 +849,7 @@ to build neither.
 | Webhook acted on before recording | Medium | Critical | B6 records first; `unique (provider, event_id)` makes a replay a no-op |
 | Contract drift between API and two frontends | Medium | Medium | `hc` types + OpenAPI generated from the same Zod schemas |
 | Razorpay SDK misbehaves under Bun | Medium | Medium | B0 spike; fall back to `fetch` against their REST API, or run the API on Node |
-| Two auth paths drift (browser↔Supabase Auth vs browser↔API) | Medium | Medium | Browser uses supabase-js for session only; one shared `getSession` helper |
+| ~~Two auth paths drift (browser↔Supabase Auth vs browser↔API)~~ | — | — | **Closed by B16.** There is one path now: the browser reaches Supabase only through this API. Nothing to keep in step |
 | API is a single point of failure for both apps | Medium | High | Health checks and a rollback plan before the storefront launches |
 | `turbo prune` gaps on Bun bite the API's Docker build | Low | Medium | Verify before containerizing; plain `turbo build` is unaffected. Dokploy can also build with Nixpacks and skip prune entirely |
 
@@ -603,6 +866,7 @@ patched, **this file wins**:
 | Admin holds `SUPABASE_SERVICE_ROLE_KEY` | Only the API holds it |
 | Admin Phase 3 owns `0012_admin_rpc.sql` | Owned here, as B3 |
 | Storefront track S1–S6 hits Supabase directly | Collapses to "call the API" |
+| Both apps hold `NEXT_PUBLIC_SUPABASE_*` and use supabase-js for the session | Neither does. Auth goes through `/auth/*` (B16); no Supabase credentials reach a browser |
 
 Admin Phase 2 (data layer conventions) becomes "typed `hc` client + error mapping", and
 its Phase 3 is deleted.
@@ -635,3 +899,8 @@ admin's read-only screens.
 | B11 Jobs | **done** | `20260801002000_jobs.sql`; outbox drain + pg_cron fallback |
 | B12 Cross-cutting | **done** | CORS closed by default, rate limits, `@ecom/client` |
 | B13 Realtime | scope-guarded | Supabase Realtime unless a screen demands more |
+| B14 Orders | **done** | order reads + the two B3 RPCs nothing called; guest tracking still open |
+| B15 Staff accounts | **done** | the fourth service-key path; promoting an existing customer still open |
+| B16 Auth surface | **done** | reverses B0: the API owns sign-in/up/out, refresh and password reset |
+| B17 Email | **done** | all mail via `message_log`; provider switchable (Resend / any SMTP); fixed a reset that never worked |
+| B18 Email templates | **done** | `message_templates` overrides the built-ins; preview, revert, and a renderer that refuses broken copy |
