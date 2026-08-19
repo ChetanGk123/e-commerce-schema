@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#5, #6, #7, #8, #9, #10, #17 done; #1 part-done. The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#10, #14, #17 done; #1 part-done. The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -40,7 +40,7 @@ that were never built, and the seam that nothing tests.**
 | ~~17~~ | ~~No integration tests~~ | **done** |
 | 1 | Catalog writes — **products and variants done**; options, images, categories still SQL | |
 | ~~2–4~~ | ~~No discount, settings or shipping writes~~ | **done** |
-| 14 | RLS ignores `staff_users.role` | A warehouse JWT reads `cost_price` and all PII |
+| ~~14~~ | ~~RLS ignores `staff_users.role`~~ | **done**, except `cost_price` |
 | ~~6~~ | ~~Nothing marks a shipment delivered~~ | **done** |
 
 ---
@@ -264,13 +264,31 @@ that were never built, and the seam that nothing tests.**
 
 ## Security
 
-- [ ] **14. The RLS role matrix.** `requireRole` guards three route groups —
-      staff CRUD and email templates (`routes/staff.ts`, `routes/email-templates.ts`).
-      Everything else stops at `requireStaff`, and RLS grants every active staff
-      member full read/write on all 51 tables. The anon key is not secret, so a
-      warehouse packer's own JWT reads `cost_price` and all customer PII straight
-      from PostgREST, whatever the admin UI shows. `src/auth.ts` states this as
-      accepted risk. It remains the highest-value security change available.
+- [x] **14. The RLS role matrix.** — **done for the sensitive tables**,
+      migration `20260801002300_role_matrix.sql`.
+      *The sharpest edge was not `cost_price`.* `staff_all` was `for all` with
+      `using (is_staff())`, so **a warehouse account could `UPDATE` its own
+      `staff_users` row and set `role = 'owner'`** — one PostgREST call, no
+      admin UI involved. That is now owner/admin only, with a self-read
+      everyone keeps because `requireStaff` looks the caller up on every admin
+      request and denying it locks all non-owners out entirely.
+      *Also closed:* `store_settings` writes (owner/admin), `discounts` and
+      `gift_cards` writes (manager+), `customers` and `addresses` (warehouse
+      denied — picking uses the address snapshot on the order, not the
+      customer's history).
+      *Everything else keeps `staff_all`*, deliberately: a matrix that denies a
+      role a table it needs shows up as a 403 on a screen someone uses daily,
+      and the point was to close sharp edges rather than relitigate 51 tables.
+      *Nine tests, written against PostgREST directly rather than the API* —
+      the door the README's caveat was about. Every one of them passed before
+      the migration, which is what makes them worth having.
+      **Still open — `cost_price`, and it is not expressible this way.** Every
+      staff member connects as the same `authenticated` database role;
+      PostgREST takes it from the JWT's `role` claim, which GoTrue issues, not
+      from `staff_users.role`. RLS is row-level and column privileges are per
+      database role, so "warehouse may read the variant but not its cost" needs
+      a database role per staff role and JWTs carrying it. README.md now says
+      exactly this instead of the old blanket caveat.
 
 - [ ] **15. No per-account lockout.** Sign-in is limited per IP at cost 10 of a
       60/min budget — six attempts a minute from one address. Credential stuffing

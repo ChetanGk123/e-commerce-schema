@@ -164,11 +164,18 @@ export const requireStaff = createMiddleware(async (c, next) => {
 /**
  * Role gating. Runs after requireStaff.
  *
- * ACCEPTED RISK, stated so nobody mistakes this for a security boundary: RLS
- * grants every active staff member full read/write on all 51 tables regardless
- * of staff_users.role. A warehouse account can reach the same rows through
- * PostgREST directly. This shapes the product surface; it does not contain
- * anyone. The fix is a role matrix in RLS (api-plan B11 / README).
+ * Since migration 0023 this is no longer the only thing standing between a
+ * role and a table it should not touch: RLS enforces the matrix on
+ * staff_users, store_settings, discounts, gift_cards, customers and
+ * addresses, so a warehouse JWT calling PostgREST directly is refused there
+ * too. On those tables this check shapes the product surface and the
+ * database backs it.
+ *
+ * Everywhere else it is still only a product surface. The remaining hole is
+ * cost_price on product_variants: every staff member connects as the same
+ * `authenticated` database role, and column privileges are per role, so
+ * "read the variant but not its cost" cannot be expressed in RLS. See
+ * README.md.
  */
 export function requireRole(...allowed: StaffRole[]) {
   return createMiddleware(async (c, next) => {

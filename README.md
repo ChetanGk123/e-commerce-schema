@@ -141,22 +141,39 @@ Before deploying, know that:
   `inventory_movements` and `price_history` grow without bound. Partition by
   month before they get large, not after.
 
-## Known accepted risk: staff authorization
+## Staff authorization
 
-`staff_users.role` defines owner/admin/manager/support/warehouse, but RLS
-**ignores it**. The `staff_all` policy gives every active staff member full
-read/write on all 51 tables.
+`staff_users.role` defines owner/admin/manager/support/warehouse, and since
+migration `0023_role_matrix` RLS enforces it on the tables that carry money,
+identity or configuration:
 
-A warehouse packer's JWT can therefore read `cost_price`, all customer PII, and
-`store_settings`, and write to any table, by calling PostgREST directly —
-whatever the admin UI displays. The database draws the staff / non-staff line
-only; per-role enforcement is currently an application concern.
+| Table | Who |
+|---|---|
+| `staff_users` | owner/admin manage the team; everyone else reads **their own row only** |
+| `store_settings` | all staff read; owner/admin write |
+| `discounts`, `gift_cards` | all staff read; manager and above write |
+| `customers`, `addresses` | owner/admin/manager/support; **warehouse cannot** |
 
-Two things limit the blast radius: append-only triggers apply to staff as well,
-and `audit_row()` records who changed what on the sensitive tables.
+The self-read on `staff_users` is load-bearing, not a convenience: the API
+looks the caller up in that table on every admin request, so denying it locks
+every non-owner out of the admin surface entirely.
 
-Replacing this with a role matrix in RLS is the single highest-value security
-change available.
+Before this, `staff_all` gave every active staff member full read/write on all
+51 tables — which meant a warehouse account could `UPDATE` its own row and set
+`role = 'owner'`. One PostgREST call, no admin UI involved. `supabase/tests`
+and the API's integration suite both assert that door is shut.
+
+**Still open: `cost_price`.** Every staff member connects to Postgres as the
+same `authenticated` role — PostgREST takes that from the JWT's `role` claim,
+which GoTrue issues, not from `staff_users.role`. RLS is row-level; column
+privileges are per database role. So "warehouse may read variants but not their
+cost" is not expressible this way. It needs a database role per staff role and
+JWTs that carry it. `product_variants` therefore keeps the blanket policy, and
+a staff JWT can still read `cost_price` through PostgREST directly.
+
+Two things limit the blast radius everywhere else: append-only triggers apply to
+staff as well, and `audit_row()` records who changed what on the sensitive
+tables.
 
 ## Testing
 

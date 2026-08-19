@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 
 import {
+  PGRST_URL,
   configureEnv,
   mintToken,
   sql,
@@ -694,5 +695,140 @@ describe.skipIf(!up)("delivery closes the order", () => {
         `select count(*) from order_events where order_id = '${orderId}' and event = 'delivered'`,
       ),
     ).toBe("1");
+  });
+});
+
+/**
+ * The role matrix (migration 0023).
+ *
+ * These are the tests that justify the migration: every one of them
+ * passed *before* it, because staff_all let any active staff member do
+ * anything. They are written against PostgREST directly rather than
+ * through the API, because that is the door the README's caveat was
+ * about -- an admin UI that hides a button proves nothing when the JWT
+ * works against the database on its own.
+ */
+describe.skipIf(!up)("staff roles are enforced by the database, not the UI", () => {
+  const OWNER = "bbbbbbbb-0000-4000-8000-000000000001";
+  const PACKER = "bbbbbbbb-0000-4000-8000-000000000009";
+  const AGENT = "bbbbbbbb-0000-4000-8000-00000000000a";
+  let pgrst: string;
+
+  beforeAll(async () => {
+    pgrst = PGRST_URL!;
+    await sql(`
+      insert into auth.users (id, email) values
+        ('${OWNER}',  'owner@test.local'),
+        ('${PACKER}', 'packer@test.local'),
+        ('${AGENT}',  'agent@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${OWNER}',  'owner@test.local',  'owner',     'Owner',  true),
+        ('${PACKER}', 'packer@test.local', 'warehouse', 'Packer', true),
+        ('${AGENT}',  'agent@test.local',  'support',   'Agent',  true)
+        on conflict (id) do update set role = excluded.role, is_active = true;
+    `);
+  });
+
+  /** Straight at PostgREST, the way anyone holding a staff JWT can. */
+  const direct = async (
+    who: string,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<Response> => {
+    const token = await mintToken("authenticated", who);
+    return fetch(`${pgrst}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
+    });
+  };
+
+  test("a packer cannot promote themselves to owner", async () => {
+    // The sharp edge. Before this migration staff_all allowed it: one
+    // PostgREST call, no admin UI involved, and the account came back as
+    // an owner on its next request.
+    const res = await direct(PACKER, `/staff_users?id=eq.${PACKER}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role: "owner" }),
+    });
+    // PostgREST reports a blocked UPDATE as "no rows matched" rather than
+    // an error, so the row itself is the assertion.
+    expect(await sqlValue(`select role from staff_users where id = '${PACKER}'`)).toBe("warehouse");
+    expect([200, 204, 404]).toContain(res.status);
+  });
+
+  test("a packer cannot read the rest of the team", async () => {
+    const res = await direct(PACKER, "/staff_users?select=id,role");
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as { id: string }[];
+    // Their own row and nothing else -- requireStaff needs that one, and
+    // denying it would lock every non-owner out of the admin surface.
+    expect(rows.map((r) => r.id)).toEqual([PACKER]);
+  });
+
+  test("an owner still manages the team", async () => {
+    const res = await direct(OWNER, "/staff_users?select=id");
+    const rows = (await res.json()) as { id: string }[];
+    expect(rows.length).toBeGreaterThan(1);
+  });
+
+  test("a packer cannot read anyone else's customer record", async () => {
+    const res = await direct(PACKER, "/customers?select=id,email,phone");
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as { id: string }[];
+
+    // Not zero rows: the signup trigger gives every auth.users row a
+    // customers row, staff included, and own_profile_r lets anyone read
+    // their own. What must not be there is anybody else -- picking needs
+    // the address snapshot on the order, not every address a customer
+    // has ever used, nor their phone number.
+    expect(rows.every((r) => r.id === PACKER)).toBe(true);
+    expect(rows.map((r) => r.id)).not.toContain("aaaaaaaa-0000-4000-8000-000000000001");
+  });
+
+  test("a support agent can, because that is the job", async () => {
+    const res = await direct(AGENT, "/customers?select=id");
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  test("neither a packer nor an agent can mint a gift card", async () => {
+    for (const who of [PACKER, AGENT]) {
+      const before = await sqlValue("select count(*) from gift_cards");
+      await direct(who, "/gift_cards", {
+        method: "POST",
+        body: JSON.stringify({ code: `LIABILITY-${who.slice(-4)}`, initial_balance: 5000 }),
+      });
+      // A gift card is a liability the store has to honour.
+      expect(await sqlValue("select count(*) from gift_cards")).toBe(before);
+    }
+  });
+
+  test("nor change the GSTIN that goes on every invoice", async () => {
+    const before = await sqlValue("select coalesce(seller_gstin, '') from store_settings where id = 1");
+    await direct(PACKER, "/store_settings?id=eq.1", {
+      method: "PATCH",
+      body: JSON.stringify({ seller_gstin: "07AAAAA0000A1Z5" }),
+    });
+    expect(await sqlValue("select coalesce(seller_gstin, '') from store_settings where id = 1")).toBe(before);
+  });
+
+  test("but both can still read the settings their screens need", async () => {
+    // Denying the read would break the store name and the COD flag on
+    // every screen, which is the failure mode this matrix is shaped to
+    // avoid.
+    const res = await direct(PACKER, "/store_settings?select=store_name,cod_enabled");
+    expect(((await res.json()) as unknown[]).length).toBe(1);
+  });
+
+  test("a packer still has the tables the job needs", async () => {
+    for (const path of ["/orders?select=id&limit=1", "/inventory_movements?select=id&limit=1", "/shipments?select=id&limit=1"]) {
+      const res = await direct(PACKER, path);
+      expect(`${path}: ${res.status}`).toBe(`${path}: 200`);
+    }
   });
 });
