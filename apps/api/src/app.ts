@@ -245,6 +245,24 @@ const routes = app
   .route("/", jobsRoute);
 
 /**
+ * DOCS_PUBLIC=false hides both.
+ *
+ * Middleware rather than a branch around the routes below, because
+ * app.doc() registers its own GET handler and the first match wins --
+ * a second handler added afterwards would never run, and the document
+ * would stay readable while looking gated.
+ *
+ * 404, not 401. A 401 confirms there is something there, which is the
+ * one fact anybody asking for the route map was after.
+ */
+if (!env.DOCS_PUBLIC) {
+  // async only to satisfy the middleware signature: c.notFound() returns
+  // a Response, and a middleware must return a promise of one.
+  app.use("/docs", async (c) => c.notFound());
+  app.use("/openapi.json", async (c) => c.notFound());
+}
+
+/**
  * Declaring the scheme is what puts the Authorize button in Swagger UI. Routes
  * opt in with `security: [{ bearerAuth: [] }]`; without that a protected route
  * renders with no way to send a token and looks broken rather than guarded.
@@ -272,9 +290,14 @@ app.doc("/openapi.json", {
 /**
  * Browsable docs at /docs, and the same document Postman imports.
  *
- * Both are public, as they already were. The admin surface is protected by
- * requireStaff and RLS, not by being unlisted -- but if you would rather not
- * publish the route map, this is the line to wrap in an env check.
+ * Public by default. The admin surface is protected by requireStaff and RLS,
+ * not by being unlisted, and a document nobody can fetch is a client nobody
+ * can generate -- so this is a deployment's choice rather than a hardening
+ * step, which is why it is DOCS_PUBLIC and not an if (production).
+ *
+ * Off, both answer 404 in the same envelope as any unknown path. Not 401:
+ * a 401 confirms there is something there, which is the one fact somebody
+ * who wanted the route map was after.
  *
  * Swagger UI itself loads from a CDN, so /docs needs internet. /openapi.json
  * does not, and it is the one Postman and codegen actually consume.

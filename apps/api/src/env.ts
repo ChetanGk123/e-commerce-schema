@@ -127,6 +127,24 @@ const schema = z.object({
    */
   REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
 
+  /**
+   * Whether /docs and /openapi.json answer at all.
+   *
+   * Public by default, because that is the decision this project already
+   * took: the admin surface is guarded by requireStaff and RLS, not by
+   * being unlisted, and a document nobody can fetch is a client nobody
+   * can generate. Set false where the route map itself should not be
+   * published -- both paths then 404 rather than 401, since a 401 admits
+   * there is something there to refuse.
+   *
+   * Turning this off protects nothing on its own. If it feels like it
+   * does, the thing to fix is whatever route it is hiding.
+   */
+  DOCS_PUBLIC: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
   /** Largest request body accepted, in kilobytes. */
   MAX_BODY_KB: z.coerce.number().int().min(1).max(10_240).default(256),
 

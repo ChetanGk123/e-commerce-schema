@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#10, #13, #14, #15, #17 done; #1 and #11 part-done. Every smaller hole is closed. What is left needs a decision from you, not more code: #16 (publish the docs or not), #11's metrics destination, #12 (move the limiter to Traefik), and #1's last piece (the Storage backend for product images). The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#10, #13–#17 done; #1 and #11 part-done. Every smaller hole is closed. What is left needs a decision from you, not more code: #11's metrics destination, #12 (move the limiter to Traefik), and #1's last piece (the Storage backend for product images). The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -389,9 +389,22 @@ that were never built, and the seam that nothing tests.**
       lockouts — 40 attempts/hour against one account is slow enough, and
       escalation is where lockouts start hurting customers.
 
-- [ ] **16. `/docs` and `/openapi.json` are public.** Deliberate, and noted in
-      `app.ts` as the one line to wrap in an env check if the route map should
-      not be published. Low, listed so the decision is a decision.
+- [x] **16. `/docs` and `/openapi.json`** — **done**, as a switch rather than
+      a verdict: `DOCS_PUBLIC`, defaulting to `true`, which is the behaviour
+      that was already there. Off, both answer **404 rather than 401** — a 401
+      confirms there is something there, which is the one fact whoever asked
+      for the route map wanted.
+      *Middleware, not a branch around the routes.* `app.doc()` registers its
+      own GET handler and the first match wins, so a handler added afterwards
+      would never run and the document would stay readable while looking
+      gated. That was the first version, and it was wrong.
+      *The off case is tested in a subprocess*, because `env.ts` validates at
+      import time and bun shares one module registry across test files — by
+      the time the test runs, `app.ts` has already been imported with the flag
+      on. Fifteen lines, and worth it: the untested direction is the one
+      somebody would be relying on.
+      **This protects nothing on its own.** If turning it off feels like
+      security, the thing to fix is whatever route it is hiding.
 
 ---
 

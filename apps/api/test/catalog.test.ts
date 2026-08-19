@@ -119,6 +119,53 @@ describe("browsable docs", () => {
   });
 });
 
+describe("DOCS_PUBLIC=false", () => {
+  /**
+   * In a subprocess, because env.ts validates at import time and bun
+   * shares one module registry across every test file -- by the time
+   * this runs, app.ts has already been imported with the flag on.
+   * Setting process.env here would prove nothing.
+   *
+   * Worth the fifteen lines: the untested direction is the one somebody
+   * relies on. A gate that silently fails open leaves a deployment
+   * believing its route map is private.
+   */
+  const run = async (): Promise<Record<string, number>> => {
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        `const { app } = await import("${import.meta.dir}/../src/app.ts");
+         const out = {};
+         for (const p of ["/docs", "/openapi.json", "/catalog/products?limit=1"]) {
+           out[p] = (await app.request(p)).status;
+         }
+         console.log(JSON.stringify(out));`,
+      ],
+      {
+        env: { ...process.env, DOCS_PUBLIC: "false", LOG_LEVEL: "fatal" },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const text = await new Response(proc.stdout).text();
+    if ((await proc.exited) !== 0) {
+      throw new Error(await new Response(proc.stderr).text());
+    }
+    return JSON.parse(text.trim().split("\n").pop()!) as Record<string, number>;
+  };
+
+  test("both documents are gone, and nothing else is", async () => {
+    const status = await run();
+    expect(status["/docs"]).toBe(404);
+    expect(status["/openapi.json"]).toBe(404);
+    // 404 rather than 401: a 401 confirms there is something there, which
+    // is the one fact whoever asked for the route map was after. And the
+    // service still serves -- hiding the map is not turning the API off.
+    expect(status["/catalog/products?limit=1"]).not.toBe(404);
+  });
+});
+
 describe("B4 admin catalog is behind auth", () => {
   test.each([
     ["/admin/products"],
