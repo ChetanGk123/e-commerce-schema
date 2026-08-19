@@ -38,7 +38,7 @@ that were never built, and the seam that nothing tests.**
 | ~~8~~ | ~~No graceful shutdown~~ | **done** |
 | ~~9~~ | ~~No readiness probe~~ | **done** |
 | ~~17~~ | ~~No integration tests~~ | **done** |
-| 1 | Catalog writes — everything except **product images**, which need the Storage decision first | |
+| ~~1~~ | ~~Catalog writes, product images included~~ | **done** |
 | ~~2–4~~ | ~~No discount, settings or shipping writes~~ | **done** |
 | ~~14~~ | ~~RLS ignores `staff_users.role`~~ | **done**, except `cost_price` |
 | ~~6~~ | ~~Nothing marks a shipment delivered~~ | **done** |
@@ -47,8 +47,7 @@ that were never built, and the seam that nothing tests.**
 
 ## Ship-stoppers — the store cannot be operated
 
-- [~] **1. The catalog was read-only.** — **products and variants done**, the
-      rest still open.
+- [x] **1. The catalog was read-only.** — **done**, images last.
       *Shipped:* `POST /admin/products`, `PATCH /admin/products/{id}` (which is
       also the publish button), `POST /admin/products/{id}/variants`,
       `PATCH /admin/variants/{id}`. That is enough to add something and sell
@@ -105,6 +104,35 @@ that were never built, and the seam that nothing tests.**
       decision, not on effort. `setup.md` C5 has Storage on a bind-mounted
       local directory rather than S3; building an upload endpoint against an
       unbacked volume would be building the wrong thing.
+
+      *Images, once R2 was chosen* (`setup.md` C5a). `POST
+      /admin/products/{id}/images`, `PATCH` and `DELETE /admin/images/{id}`.
+      **No migration**: `product_images.url` has always been plain `text`, so
+      the schema never cared where a file lived.
+      *The write path and the read path are deliberately different.* Bytes go
+      through Supabase Storage, which already exists and already authenticates,
+      so the API needs no S3 SDK and holds no R2 credentials. Reads do not:
+      `STORAGE_PUBLIC_URL` is a custom domain on the bucket, so a storefront's
+      `<img src>` hits Cloudflare's edge and never touches this service.
+      Serving images back through `/storage/v1/object/public/...` would proxy
+      every byte through the container and throw away the only reason to be on
+      R2. The stored URL is built from configuration, so the domain can go in
+      front later without rewriting a row.
+      *The file type is read from the bytes, not the header.* An HTML file
+      announced as `image/png` and served from a trusted domain is stored XSS;
+      a `.heic` renamed to `.jpg` is a broken image found by a customer. Twelve
+      bytes settles both, and AVIF and HEIC share a box layout, so it is the
+      brand that is checked and not `ftyp`.
+      *The object key is generated here and never taken from the upload* — a
+      filename over HTTP is an attacker's string, and a repeated one silently
+      overwrites another product's photograph.
+      *Delete drops the row first and the object after.* An object with no row
+      costs a fraction of a cent and is invisible; a row with no object is a
+      broken image on a product page. If only one can succeed it must be that
+      order, and a failed object delete is a log line rather than a 500.
+      **Not covered:** images are outside `backup.sh`. On R2 that is
+      Cloudflare's durability rather than one host's disk, which is the
+      upgrade — but `dist/backup/` still will not contain them.
 
 - [x] **2. No discount or coupon management.** — **done**.
       `POST`/`GET` `/admin/discounts`, `PATCH /admin/discounts/{id}`, reusing
@@ -551,10 +579,9 @@ that were never built, and the seam that nothing tests.**
 2. ~~**#7, #8, #9**~~ — done. The API can be deployed and redeployed without
    dropping traffic.
 3. ~~**#17**~~ — done, and before the catalog writes as planned.
-4. ~~**#2–#4**~~ — done. **#1** remains part-done, and by one thing only:
-   products, variants, options, option values, categories and collections all
-   have admin routes now. **Product images do not**, and they need the Storage
-   decision (`setup.md` C5) before they are worth building.
+4. ~~**#2–#4**~~ — done, and **#1** with them. The Storage decision came back
+   as Cloudflare R2 (`setup.md` C5a), so product images were the last piece and
+   they are built: upload, recaption, reorder, delete.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
 
 Both finished items took longer than the entry predicted, for the same reason:

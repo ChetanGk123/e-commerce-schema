@@ -160,6 +160,32 @@ const schema = z.object({
    */
   METRICS_TOKEN: blankAsUnset(z.string().min(16).optional()),
 
+  /**
+   * Supabase Storage bucket holding product images. Unset means the
+   * image routes answer 503 rather than pretending -- a store can be
+   * built and run without them, and half-configured storage that fails
+   * on upload is worse than storage that says it is not there.
+   *
+   * The bucket is backed by Cloudflare R2; the credentials live on the
+   * storage container, not in this process. See docs/setup.md C5.
+   */
+  STORAGE_BUCKET: blankAsUnset(z.string().min(1).optional()),
+
+  /**
+   * Where a browser fetches those images from -- a custom domain on the
+   * R2 bucket, e.g. https://images.example.com.
+   *
+   * Unset, image URLs fall back to Supabase Storage's own public path,
+   * which works and proxies every byte through the storage container.
+   * That is your bandwidth and it throws away the one reason to be on
+   * R2. Set this before any real traffic.
+   */
+  STORAGE_PUBLIC_URL: blankAsUnset(z.string().url().optional()),
+
+  /** Largest image accepted, in kilobytes. Separate from MAX_BODY_KB,
+   *  which is sized for JSON and would reject every photograph. */
+  MAX_IMAGE_KB: z.coerce.number().int().min(64).max(51_200).default(5_120),
+
   /** Largest request body accepted, in kilobytes. */
   MAX_BODY_KB: z.coerce.number().int().min(1).max(10_240).default(256),
 

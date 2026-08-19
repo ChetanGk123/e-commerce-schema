@@ -234,3 +234,66 @@ describe("caching", () => {
     expect(res.headers.get("etag")).toBeNull();
   });
 });
+
+describe("product images", () => {
+  test("the type comes from the bytes, not the header", async () => {
+    const { sniffImageType } = await import("../src/storage");
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(sniffImageType(png)).toEqual({ ext: "png", mime: "image/png" });
+    expect(sniffImageType(jpg)).toEqual({ ext: "jpg", mime: "image/jpeg" });
+
+    // "<!DOCTYPE html>" -- the one that matters. Announced as image/png
+    // and served from a domain a browser trusts, this is stored XSS.
+    const html = new TextEncoder().encode("<!DOCTYPE html><script>alert(1)</script>");
+    expect(sniffImageType(html)).toBeNull();
+
+    // Too short to identify is not an image either.
+    expect(sniffImageType(new Uint8Array([0xff, 0xd8, 0xff]))).toBeNull();
+  });
+
+  test("HEIC is refused even though it shares AVIF's box layout", async () => {
+    const { sniffImageType } = await import("../src/storage");
+    const box = (brand: string) =>
+      new Uint8Array([0, 0, 0, 0x18, ...new TextEncoder().encode("ftyp" + brand)]);
+    expect(sniffImageType(box("avif"))).toEqual({ ext: "avif", mime: "image/avif" });
+    // A phone's photo, which nothing on the storefront can display. This
+    // is why the brand is checked and not just `ftyp`.
+    expect(sniffImageType(box("heic"))).toBeNull();
+  });
+
+  test("a URL this service did not write yields no object to delete", async () => {
+    const { pathFromUrl } = await import("../src/storage");
+    // An image added by hand in psql, or one left on the old host. The
+    // row should still go; guessing at a key to delete should not.
+    expect(pathFromUrl("https://cdn.example.com/somebody-elses/photo.jpg")).toBeNull();
+  });
+
+  test("the upload route is declared, and says 415 and 503", async () => {
+    const paths = (await doc()).paths as Record<
+      string,
+      Record<string, { responses: Record<string, unknown>; security?: unknown[] }>
+    >;
+    const post = paths["/admin/products/{id}/images"]?.post;
+    expect(post).toBeDefined();
+    expect(post?.security).toBeDefined();
+    // 415 is the sniffing; 503 is "no bucket configured", which is a
+    // deployment that has not been finished rather than a bad request.
+    expect(post?.responses["415"]).toBeDefined();
+    expect(post?.responses["503"]).toBeDefined();
+    expect(paths["/admin/images/{id}"]?.delete?.responses["204"]).toBeDefined();
+  });
+
+  test("nobody uploads to the catalog without a staff token", async () => {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array([0xff, 0xd8, 0xff])]), "x.jpg");
+    const res = await app.request(
+      "/admin/products/00000000-0000-4000-8000-000000000000/images",
+      { method: "POST", body: form },
+    );
+    // Auth answers before storage does. Worth pinning: an upload route
+    // that checked its bucket first would tell a stranger whether this
+    // deployment has one, and would spend a multipart parse doing it.
+    expect(res.status).toBe(401);
+  });
+});

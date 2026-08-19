@@ -5,6 +5,13 @@ import { HTTPException } from "hono/http-exception";
 import { requireAuth, requireStaff } from "../auth";
 import { throwOnDbError } from "../errors";
 import { PAGE_MAX, jsonError, pageQuery, validationHook } from "../schemas";
+import {
+  deleteObject,
+  pathFromUrl,
+  sniffImageType,
+  storageConfigured,
+  uploadImage,
+} from "../storage";
 
 /**
  * Admin catalog reads and writes.
@@ -873,4 +880,263 @@ export const adminCatalogRoute = new OpenAPIHono({ defaultHook: validationHook }
       },
       200,
     );
+  });
+
+/* ---------- images ---------- */
+
+/**
+ * Product images, the last thing in the catalog that was still SQL.
+ *
+ * The bytes go to Cloudflare R2 through Supabase Storage; see
+ * ../storage.ts for why the write path and the read path are different.
+ * What lands in the database is a URL, which is all `product_images.url`
+ * has ever been -- the schema never cared where the file lived, so none
+ * of this needed a migration.
+ */
+
+const Image = z
+  .object({
+    id: z.string().uuid(),
+    productId: z.string().uuid(),
+    variantId: z.string().uuid().nullable(),
+    url: z.string(),
+    altText: z.string().nullable(),
+    position: z.number().int(),
+  })
+  .openapi("AdminImage");
+
+interface ImageRow {
+  id: string;
+  product_id: string;
+  variant_id: string | null;
+  url: string;
+  alt_text: string | null;
+  position: number;
+}
+
+const shapeImage = (r: ImageRow) => ({
+  id: r.id,
+  productId: r.product_id,
+  variantId: r.variant_id,
+  url: r.url,
+  altText: r.alt_text,
+  position: r.position,
+});
+
+const uploadImageRoute = createRoute({
+  method: "post",
+  path: "/admin/products/{id}/images",
+  tags: ["admin", "catalog"],
+  summary: "Upload a product image",
+  description:
+    "multipart/form-data with a `file` part. `altText`, `position` and `variantId` are optional parts alongside it.\n\nThe file type is decided by reading the first bytes, not by the declared Content-Type: JPEG, PNG, WebP and AVIF are accepted and anything else is a 415, whatever the header claims. The stored key is a uuid this service generates — an uploaded filename is an attacker's string, and a repeated one would overwrite somebody else's photograph.\n\n`variantId` must belong to this product; the composite foreign key refuses otherwise.\n\n503 when no bucket is configured, which is a deployment that has not set STORAGE_BUCKET rather than a request that did anything wrong.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "multipart/form-data": {
+          schema: z.object({
+            file: z.any().openapi({ type: "string", format: "binary" }),
+            altText: z.string().max(200).optional(),
+            position: z.string().optional(),
+            variantId: z.string().uuid().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Stored",
+      content: { "application/json": { schema: Image } },
+    },
+    400: jsonError("No file part, or it was empty"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Not staff"),
+    404: jsonError("No such product"),
+    413: jsonError("Larger than MAX_IMAGE_KB"),
+    415: jsonError("Not a JPEG, PNG, WebP or AVIF"),
+    503: jsonError("No image storage is configured"),
+  },
+});
+
+const patchImage = createRoute({
+  method: "patch",
+  path: "/admin/images/{id}",
+  tags: ["admin", "catalog"],
+  summary: "Re-caption, reorder or reassign an image",
+  description:
+    "The metadata only. Replacing the picture is an upload and a delete, because a key that never changes is what lets the CDN cache it for a year.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              altText: z.string().max(200).nullable().optional(),
+              position: z.number().int().nonnegative().optional(),
+              variantId: z.string().uuid().nullable().optional(),
+            })
+            .refine((b) => Object.keys(b).length > 0, "Nothing to change"),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: Image } } },
+    400: jsonError("Invalid body"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Not staff"),
+    404: jsonError("No such image"),
+    422: jsonError("That variant belongs to a different product"),
+  },
+});
+
+const deleteImage = createRoute({
+  method: "delete",
+  path: "/admin/images/{id}",
+  tags: ["admin", "catalog"],
+  summary: "Remove an image",
+  description:
+    "The row goes first and the object after. An object with no row costs a fraction of a cent and is invisible; a row with no object is a broken image on a product page, so if only one of the two can succeed it must be that order.\n\n204 either way. A storage delete that failed is logged, not returned — the caller asked for the image to stop appearing, and it has.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    204: { description: "Gone" },
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Not staff"),
+    404: jsonError("No such image"),
+  },
+});
+
+export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
+  .openapi(uploadImageRoute, async (c) => {
+    const { id } = c.req.valid("param");
+    const caller = c.get("caller");
+    if (!storageConfigured()) {
+      throw new HTTPException(503, {
+        message: "Image storage is not configured on this deployment.",
+        cause: { code: "storage_unconfigured" },
+      });
+    }
+
+    // Before spending an upload on it. RLS would let staff insert a row
+    // against a product that does not exist only to fail on the foreign
+    // key -- after the bytes are already in the bucket, orphaned.
+    const product = await caller.db.from("products").select("id").eq("id", id).maybeSingle();
+    throwOnDbError(product.error);
+    if (!product.data) {
+      throw new HTTPException(404, {
+        message: "No such product",
+        cause: { code: "not_found" },
+      });
+    }
+
+    const form = await c.req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      throw new HTTPException(400, {
+        message: "Attach an image as the `file` part.",
+        cause: { code: "no_file" },
+      });
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const kind = sniffImageType(bytes);
+    if (!kind) {
+      // Reading the bytes, not the header. A .heic renamed to .jpg is
+      // the common honest case; an HTML file announced as image/png is
+      // the other one.
+      throw new HTTPException(415, {
+        message: "That is not a JPEG, PNG, WebP or AVIF.",
+        cause: { code: "unsupported_image" },
+      });
+    }
+
+    const { url } = await uploadImage(id, bytes, kind);
+
+    const variantId = form.get("variantId");
+    const position = Number(form.get("position") ?? 0);
+    const altText = form.get("altText");
+
+    const { data, error } = await caller.db
+      .from("product_images")
+      .insert({
+        product_id: id,
+        variant_id: typeof variantId === "string" && variantId ? variantId : null,
+        url,
+        alt_text: typeof altText === "string" && altText ? altText : null,
+        position: Number.isFinite(position) ? position : 0,
+      })
+      .select("id, product_id, variant_id, url, alt_text, position")
+      .single();
+    throwOnDbError(error);
+
+    c.get("log")?.info({ productId: id, url }, "catalog.image_uploaded");
+    return c.json(shapeImage(data as unknown as ImageRow), 201);
+  })
+
+  .openapi(patchImage, async (c) => {
+    const { id } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const caller = c.get("caller");
+
+    const patch: Record<string, unknown> = {};
+    if (body.altText !== undefined) patch.alt_text = body.altText;
+    if (body.position !== undefined) patch.position = body.position;
+    if (body.variantId !== undefined) patch.variant_id = body.variantId;
+
+    const { data, error } = await caller.db
+      .from("product_images")
+      .update(patch)
+      .eq("id", id)
+      .select("id, product_id, variant_id, url, alt_text, position")
+      .maybeSingle();
+    throwOnDbError(error);
+    if (!data) {
+      throw new HTTPException(404, {
+        message: "No such image",
+        cause: { code: "not_found" },
+      });
+    }
+    return c.json(shapeImage(data as unknown as ImageRow), 200);
+  })
+
+  .openapi(deleteImage, async (c) => {
+    const { id } = c.req.valid("param");
+    const caller = c.get("caller");
+
+    // Read the URL before deleting the row -- afterwards there is
+    // nothing left to say which object this was.
+    const found = await caller.db
+      .from("product_images")
+      .select("url")
+      .eq("id", id)
+      .maybeSingle();
+    throwOnDbError(found.error);
+    if (!found.data) {
+      throw new HTTPException(404, {
+        message: "No such image",
+        cause: { code: "not_found" },
+      });
+    }
+
+    const { error } = await caller.db.from("product_images").delete().eq("id", id);
+    throwOnDbError(error);
+
+    const path = pathFromUrl((found.data as { url: string }).url);
+    if (path && !(await deleteObject(path))) {
+      // Not an error for the caller: the image has stopped appearing,
+      // which is what they asked for. The object is now costing a
+      // fraction of a cent until somebody sweeps the bucket.
+      c.get("log")?.warn({ imageId: id, path }, "storage.orphaned_object");
+    }
+
+    return c.body(null, 204);
   });

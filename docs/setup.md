@@ -464,13 +464,67 @@ latter, and `01_invariants.sql` loads fixtures so it cannot run against a databa
 has data. The seed is only ~44 rows across 16 tables, so this proves the *procedure*, not
 that a 40GB dump transfers — but the procedure is what fails, and it is what nobody checks.
 
-**Still not covered, and neither script will tell you:** product images, if Storage keeps
-them on a local volume rather than an S3-compatible backend. That volume is a separate
-backup. Role passwords are stripped (`--no-role-passwords`); set them from
+**Still not covered, and neither script will tell you:** product images. See C5a — on R2
+they are Cloudflare's problem rather than an unbacked Docker volume, but they are still
+not in `dist/backup/`. Role passwords are stripped (`--no-role-passwords`); set them from
 `template.toml` after a real restore or nothing can connect.
 
 For real point-in-time recovery rather than nightly snapshots, run WAL-G or pgBackRest
 against the Postgres container.
+
+### C5a. Product images on Cloudflare R2
+
+The compose file bind-mounts Storage to a local directory, which means product images
+live on one host's disk and are in no backup. R2 is the fix: S3-compatible, and **no
+egress charge**, which is the bill that matters for a file served on every page view.
+
+Set on the `storage` container:
+
+```
+STORAGE_BACKEND=s3
+GLOBAL_S3_BUCKET=product-images
+GLOBAL_S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
+GLOBAL_S3_FORCE_PATH_STYLE=true
+REGION=auto
+AWS_ACCESS_KEY_ID=<R2 API token id>
+AWS_SECRET_ACCESS_KEY=<R2 API token secret>
+```
+
+and on `apps/api`:
+
+```
+STORAGE_BUCKET=product-images
+STORAGE_PUBLIC_URL=https://images.example.com
+```
+
+**`STORAGE_PUBLIC_URL` is the whole point, and it is the step people skip.** It is a
+[custom domain](https://developers.cloudflare.com/r2/buckets/public-buckets/) on the R2
+bucket. With it, a storefront's `<img src>` resolves to Cloudflare's edge and never
+touches your server. Without it the API falls back to
+`/storage/v1/object/public/...`, which works and proxies every byte through your storage
+container — your bandwidth, your CPU, and the one reason to be on R2 thrown away. The
+API builds image URLs from this variable rather than from wherever the upload landed, so
+you can add the domain later without rewriting a single row.
+
+Do **not** use the `r2.dev` development subdomain for this. It is rate-limited and
+Cloudflare says plainly it is not for production.
+
+Three things that will bite, in the order they usually do:
+
+1. **`REGION=auto`** is R2's only region. Clients that validate region strings against
+   AWS's list reject it; Supabase Storage passes it through.
+2. **AWS SDK integrity checksums.** SDK v3 began sending CRC32 trailers
+   (`STREAMING-UNSIGNED-PAYLOAD-TRAILER`) on uploads, which R2 rejected for a period. An
+   upload failing with a 400 about checksums is this, not your credentials.
+3. **imgproxy needs its own S3 configuration** (`IMGPROXY_USE_S3`, the same endpoint and
+   credentials) or it must fetch over HTTPS. Reading files off the local disk stops
+   working the moment the backend changes, and the symptom is transformations failing
+   while plain images still load.
+
+Uploads go through `POST /admin/products/{id}/images`, staff only. The API decides the
+file type by reading the first bytes rather than trusting `Content-Type`, and generates
+the object key itself — an uploaded filename is an attacker's string, and a repeated one
+would silently overwrite another product's photograph.
 
 ### C6. What you lose, and the substitutes
 

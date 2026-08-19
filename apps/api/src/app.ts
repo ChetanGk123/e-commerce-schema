@@ -12,7 +12,7 @@ import { rateLimit } from "./limits";
 import { requestLogger } from "./logger";
 import { render } from "./metrics";
 import { validationHook } from "./schemas";
-import { adminCatalogRoute } from "./routes/admin-catalog";
+import { adminCatalogRoute, adminImagesRoute } from "./routes/admin-catalog";
 import { cartRoute } from "./routes/cart";
 import { accountRoute } from "./routes/account";
 import { authRoute } from "./routes/auth";
@@ -117,7 +117,19 @@ app.use("*", (c, next) =>
  * no amount of validation downstream helps -- the allocation happens
  * first.
  */
-app.use("*", bodyLimit({ maxSize: env.MAX_BODY_KB * 1024 }));
+const jsonBodyLimit = bodyLimit({ maxSize: env.MAX_BODY_KB * 1024 });
+const imageBodyLimit = bodyLimit({ maxSize: env.MAX_IMAGE_KB * 1024 });
+
+// Image upload is the one route where the JSON-sized cap is wrong: 256KB
+// rejects every photograph a phone takes. It gets its own, larger cap
+// rather than raising the limit everywhere -- MAX_BODY_KB is what stops
+// a single request making this process allocate until it dies, and that
+// argument does not stop applying just because one route needs more.
+app.use("*", (c, next) =>
+  c.req.method === "POST" && /^\/admin\/products\/[^/]+\/images$/.test(c.req.path)
+    ? imageBodyLimit(c, next)
+    : jsonBodyLimit(c, next),
+);
 
 /**
  * Rate limits on the surfaces a stranger can write to.
@@ -225,6 +237,7 @@ const routes = app
   .route("/", emailTemplatesRoute)
   .route("/", catalogRoute)
   .route("/", adminCatalogRoute)
+  .route("/", adminImagesRoute)
   .route("/", taxonomyRoute)
   .route("/", shippingRoute)
   .route("/", adminShippingRoute)
