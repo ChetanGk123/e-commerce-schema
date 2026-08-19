@@ -95,6 +95,18 @@ export async function configureEnv(kongUrl: string): Promise<void> {
   process.env.RATE_LIMIT_PER_MINUTE = "0";
 }
 
+/** One value back out of the database, for asserting what a trigger did. */
+export async function sqlValue(query: string): Promise<string> {
+  const proc = Bun.spawn(
+    ["docker", "exec", "-i", "ecomm-verify", "psql", "-U", "postgres", "-tAc", query],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if ((await proc.exited) !== 0) {
+    throw new Error(`psql failed: ${await new Response(proc.stderr).text()}`);
+  }
+  return (await new Response(proc.stdout).text()).trim();
+}
+
 /** Direct SQL, for arranging rows the API has no endpoint to create. */
 export async function sql(statement: string): Promise<void> {
   const proc = Bun.spawn(

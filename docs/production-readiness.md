@@ -38,7 +38,8 @@ that were never built, and the seam that nothing tests.**
 | ~~8~~ | ~~No graceful shutdown~~ | **done** |
 | ~~9~~ | ~~No readiness probe~~ | **done** |
 | ~~17~~ | ~~No integration tests~~ | **done** |
-| 1–4 | No catalog, discount, settings or shipping writes | The store can only be run by hand in SQL |
+| 1 | Catalog writes — **products and variants done**; options, images, categories still SQL | |
+| 2–4 | No discount, settings or shipping writes | Still SQL-only |
 | 14 | RLS ignores `staff_users.role` | A warehouse JWT reads `cost_price` and all PII |
 | 6 | Nothing marks a shipment delivered | Orders stay "shipped" permanently |
 
@@ -46,14 +47,31 @@ that were never built, and the seam that nothing tests.**
 
 ## Ship-stoppers — the store cannot be operated
 
-- [ ] **1. The catalog is read-only.** `apps/api/src/routes/admin-catalog.ts`
-      declares exactly two routes, both `get`. There is no way through this API
-      to create or edit a product, variant, option, price, category, collection
-      or product image — every catalog change is hand-written SQL or a Studio
-      click. That also means `price_history` and `audit_row()` never fire
-      through the audited path they were built for: the one place a price edit
-      is supposed to be attributable is the one place prices cannot be edited.
-      Includes image upload, which needs a Storage decision first (see `setup.md` C5).
+- [~] **1. The catalog was read-only.** — **products and variants done**, the
+      rest still open.
+      *Shipped:* `POST /admin/products`, `PATCH /admin/products/{id}` (which is
+      also the publish button), `POST /admin/products/{id}/variants`,
+      `PATCH /admin/variants/{id}`. That is enough to add something and sell
+      it without opening psql.
+      *No migration, and no new validation.* `productAdminSchema` and
+      `variantAdminSchema` already existed in `@ecom/schema` with no caller —
+      the same pattern as the rest of this repo — and catalog writes need no
+      RPC: `staff_all` already permits them and the audit and price-history
+      triggers already fire. The routes are the only thing that was missing.
+      *Two refusals kept deliberate:* `status` is not a create field, so a
+      product arrives as a draft rather than published by a stray checkbox;
+      `stock` is not a variant field at all, because `inventory_movements` is
+      the source of truth and `variant.stock` is its cache. Stock moves
+      through `POST /admin/inventory/movements`.
+      *Proven against a real database,* including the one `api-plan.md` rates
+      High: a price edit lands in `audit_logs` **with the staff member's id**,
+      which is only true because the write runs on `caller.db` rather than the
+      service key. Also that a draft is invisible until published, that
+      repricing writes `price_history` by trigger, and that a duplicate slug
+      is a 409 rather than a 500 quoting the index.
+      *Still open:* options and option values, product images (needs the
+      Storage decision, `setup.md` C5), categories, collections, product
+      relations, and delete/archive of a product.
 
 - [ ] **2. No discount or coupon management.** `checkout()` takes
       `p_coupon_code` (`routes/checkout.ts:143`) and the schema carries the whole
@@ -269,7 +287,8 @@ that were never built, and the seam that nothing tests.**
    dropping traffic.
 3. ~~**#17**~~ — done, and before the catalog writes as planned.
 4. **#1–#4** — a lot of new SQL-touching code, and now there is something
-   that will notice when it disagrees with the schema.
+   that notices when it disagrees with the schema. Products and variants are
+   done; options, images, discounts, settings and shipping rates are not.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
 
 Both finished items took longer than the entry predicted, for the same reason:

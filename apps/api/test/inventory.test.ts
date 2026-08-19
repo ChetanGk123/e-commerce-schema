@@ -3,7 +3,10 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
+import { variantAdminSchema } from "@ecom/schema/validation";
+
 import { app } from "../src/app";
+import { VariantPatch } from "../src/routes/admin-catalog";
 
 /**
  * B7's validation bullet is a claim about the whole codebase rather than
@@ -42,8 +45,25 @@ describe("B7 the ledger is the only way stock moves", () => {
     expect(files.map((f) => f.path)).toContain("routes/inventory.ts");
   });
 
+  /**
+   * One file is exempt, and the exemption is narrower than it looks.
+   *
+   * routes/admin-catalog.ts updates product_variants to reprice and to
+   * archive. It cannot reach `stock`: the body is VariantPatch, derived
+   * from @ecom/schema's variantAdminSchema, which has no stock field, and
+   * zod strips what it does not declare before the handler sees it. The
+   * test below proves that rather than asserting it.
+   *
+   * The scan stays for every other file because it catches the next
+   * handler, which is the whole reason it exists. What it cannot do is
+   * see through a variable -- so where a route legitimately updates this
+   * table, the guarantee has to come from the schema instead.
+   */
+  const EXEMPT = new Set(["routes/admin-catalog.ts"]);
+
   test("nothing updates or upserts product_variants", () => {
     for (const { path, text } of files) {
+      if (EXEMPT.has(path)) continue;
       // .update()/.upsert() anywhere downstream of product_variants, on one
       // chain. supabase-js chains can wrap, so newlines count as space.
       const chain = text.replace(/\s+/g, " ");
@@ -51,6 +71,20 @@ describe("B7 the ledger is the only way stock moves", () => {
         chain,
       );
       expect(`${path}: ${offending?.[0] ?? "clean"}`).toBe(`${path}: clean`);
+    }
+  });
+
+  test("the exempt file's variant write cannot carry stock", () => {
+    // The exemption is only safe while this holds. A future edit that adds
+    // `stock` to variantAdminSchema -- for a form field, say -- would let
+    // the cache be set behind the ledger's back, and this is what notices.
+    for (const schema of [variantAdminSchema, VariantPatch]) {
+      const parsed = schema.parse({
+        sku: "GUARD-1",
+        price: 100,
+        stock: 500,
+      }) as Record<string, unknown>;
+      expect(Object.keys(parsed)).not.toContain("stock");
     }
   });
 

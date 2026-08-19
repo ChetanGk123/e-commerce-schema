@@ -1,3 +1,4 @@
+import { productAdminSchema, variantAdminSchema } from "@ecom/schema/validation";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
@@ -6,7 +7,7 @@ import { throwOnDbError } from "../errors";
 import { PAGE_MAX, jsonError, pageQuery, validationHook } from "../schemas";
 
 /**
- * Admin catalog reads.
+ * Admin catalog reads and writes.
  *
  * The mirror image of routes/catalog.ts, and the differences are the whole
  * point:
@@ -155,7 +156,144 @@ const AdminProductDetail = z
   })
   .openapi("AdminProductDetail");
 
+/* ---------- write schemas ---------- */
+
+/**
+ * The bodies come from @ecom/schema, unchanged.
+ *
+ * productAdminSchema and variantAdminSchema were written for the admin
+ * forms and had no caller: the catalog was readable through this API and
+ * editable only in SQL. Reusing them rather than restating the rules here
+ * is what keeps the form, the request and this handler agreeing about
+ * what a valid product is.
+ *
+ * Two things they deliberately leave out, and both are load-bearing:
+ *
+ *   `status` is not a create field. A product arrives as 'draft' -- the
+ *   column default -- so publishing is a separate, deliberate act rather
+ *   than a checkbox someone leaves ticked by accident.
+ *
+ *   `stock` is not a variant field. inventory_movements is the source of
+ *   truth and variant.stock is a cache its trigger maintains; setting it
+ *   here would put the cache and the ledger out of step with nothing to
+ *   notice. Stock changes through POST /admin/inventory/movements.
+ */
+const ProductPatch = productAdminSchema
+  .partial()
+  .extend({ status: z.enum(["draft", "active", "archived"]).optional() })
+  .refine((b) => Object.keys(b).length > 0, {
+    message: "Send at least one field to change",
+  });
+
+export const VariantPatch = variantAdminSchema
+  .innerType()
+  .partial()
+  .extend({ status: z.enum(["active", "archived"]).optional() })
+  .refine((b) => Object.keys(b).length > 0, {
+    message: "Send at least one field to change",
+  });
+
+const Created = z
+  .object({ id: z.string().uuid() })
+  .openapi("CreatedResource");
+
+/** snake_case for the database; the schemas already speak it. */
+const defined = <T extends object>(o: T): Partial<T> =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+
 /* ---------- routes ---------- */
+
+/* ---------- writes ---------- */
+
+const createProduct = createRoute({
+  method: "post",
+  path: "/admin/products",
+  tags: ["admin", "catalog"],
+  summary: "Create a product",
+  description:
+    "Created as a **draft**, whatever the body says -- `status` is not an input here. A product with no variants cannot be sold, so publishing is a second step taken after there is something to sell.\n\nA duplicate slug answers 409 rather than 500: `products_slug_format` and the unique index are the schema refusing, and errors.ts translates both.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    body: { content: { "application/json": { schema: productAdminSchema } } },
+  },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: Created } } },
+    400: jsonError("The body does not validate"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    409: jsonError("That slug is already taken"),
+  },
+});
+
+const updateProduct = createRoute({
+  method: "patch",
+  path: "/admin/products/{id}",
+  tags: ["admin", "catalog"],
+  summary: "Change a product, or publish it",
+  description:
+    "Partial: send only what changes. `status` moves it between draft, active and archived -- this is the publish button.\n\nEvery field here is audited. The write runs as the signed-in staff member, not on the service key, so `audit_logs.staff_id` names whoever made the change; doing it the other way records it anonymously and the trail is worth nothing.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ProductPatch } } },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: Created } } },
+    400: jsonError("The body does not validate, or is empty"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    404: jsonError("No such product"),
+    409: jsonError("That slug is already taken"),
+  },
+});
+
+const createVariant = createRoute({
+  method: "post",
+  path: "/admin/products/{id}/variants",
+  tags: ["admin", "catalog"],
+  summary: "Add a variant",
+  description:
+    "The variant is the unit of sale, so this is what makes a product sellable.\n\n**Stock is not a field.** `inventory_movements` is the source of truth and `product_variants.stock` is a cache its trigger maintains -- a variant starts at zero and takes stock through POST /admin/inventory/movements. Setting it here would put the cache and the ledger out of step, and nothing downstream would report it.\n\n`compare_at_price` below `price` is refused: a strike-through under the selling price is a pricing bug and, in India, a consumer-protection problem.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: variantAdminSchema } } },
+  },
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: Created } } },
+    400: jsonError("The body does not validate"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    404: jsonError("No such product"),
+    409: jsonError("That SKU is already taken"),
+  },
+});
+
+const updateVariant = createRoute({
+  method: "patch",
+  path: "/admin/variants/{id}",
+  tags: ["admin", "catalog"],
+  summary: "Reprice or archive a variant",
+  description:
+    "Partial. A price change writes a `price_history` row by trigger, in the same transaction -- that record is what makes a disputed order price answerable months later, and it is not optional.\n\nStill no `stock`: use POST /admin/inventory/movements.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: VariantPatch } } },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: Created } } },
+    400: jsonError("The body does not validate, or is empty"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+    404: jsonError("No such variant"),
+    409: jsonError("That SKU is already taken"),
+  },
+});
 
 const listProducts = createRoute({
   method: "get",
@@ -444,4 +582,91 @@ export const adminCatalogRoute = new OpenAPIHono({ defaultHook: validationHook }
       },
       200,
     );
+  })
+
+  /**
+   * Every write below runs on caller.db -- the staff member's own token --
+   * and never on the service key. audit_row() reads auth.uid(), so the
+   * service key would record each price edit and each publish as having
+   * been made by nobody. staff_all already grants the access, so
+   * forwarding the JWT costs nothing and buys the whole audit trail.
+   */
+  .openapi(createProduct, async (c) => {
+    const body = c.req.valid("json");
+    const { data, error } = await c
+      .get("caller")
+      .db.from("products")
+      // No status: the column defaults to 'draft', and letting the body
+      // set it would make "published by accident" a one-keystroke
+      // mistake on the create form.
+      .insert(defined(body))
+      .select("id")
+      .single();
+    throwOnDbError(error);
+
+    c.get("log")?.info({ id: (data as { id: string }).id }, "catalog.product_created");
+    return c.json({ id: (data as { id: string }).id }, 201);
+  })
+
+  .openapi(updateProduct, async (c) => {
+    const { id } = c.req.valid("param");
+    const patch = defined(c.req.valid("json"));
+
+    const { data, error } = await c
+      .get("caller")
+      .db.from("products")
+      .update(patch)
+      .eq("id", id)
+      .select("id")
+      .maybeSingle();
+    throwOnDbError(error);
+    // maybeSingle rather than single: an id that matches nothing is a 404,
+    // not the 500 that PGRST116 would otherwise become.
+    if (!data) throw new HTTPException(404, { message: "No such product" });
+
+    c.get("log")?.info({ id, fields: Object.keys(patch) }, "catalog.product_updated");
+    return c.json({ id }, 200);
+  })
+
+  .openapi(createVariant, async (c) => {
+    const { id } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const db = c.get("caller").db;
+
+    // The FK would refuse a bad product_id anyway, but as a 23503 that
+    // reads like a server fault. Checking first makes it the 404 it is.
+    const parent = await db.from("products").select("id").eq("id", id).maybeSingle();
+    throwOnDbError(parent.error);
+    if (!parent.data) throw new HTTPException(404, { message: "No such product" });
+
+    const { data, error } = await db
+      .from("product_variants")
+      .insert({ ...defined(body), product_id: id })
+      .select("id")
+      .single();
+    throwOnDbError(error);
+
+    c.get("log")?.info(
+      { productId: id, variantId: (data as { id: string }).id },
+      "catalog.variant_created",
+    );
+    return c.json({ id: (data as { id: string }).id }, 201);
+  })
+
+  .openapi(updateVariant, async (c) => {
+    const { id } = c.req.valid("param");
+    const patch = defined(c.req.valid("json"));
+
+    const { data, error } = await c
+      .get("caller")
+      .db.from("product_variants")
+      .update(patch)
+      .eq("id", id)
+      .select("id")
+      .maybeSingle();
+    throwOnDbError(error);
+    if (!data) throw new HTTPException(404, { message: "No such variant" });
+
+    c.get("log")?.info({ id, fields: Object.keys(patch) }, "catalog.variant_updated");
+    return c.json({ id }, 200);
   });

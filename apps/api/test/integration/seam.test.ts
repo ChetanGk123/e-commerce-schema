@@ -4,6 +4,7 @@ import {
   configureEnv,
   mintToken,
   sql,
+  sqlValue,
   stackIsUp,
   startKongStandIn,
 } from "./harness";
@@ -203,3 +204,152 @@ async function firstSellableVariant(app: any): Promise<string> {
   const sellable = product.variants.find((v) => v.stock > 0) ?? product.variants[0]!;
   return sellable.id;
 }
+
+/**
+ * The catalog writes, which until now did not exist: the store could be
+ * read through this API and changed only in SQL.
+ *
+ * These belong here rather than in the unit suite because what makes them
+ * correct is what the database does afterwards -- the audit row, the
+ * price history, the draft staying invisible. A handler test would prove
+ * only that a JSON body was accepted.
+ */
+describe.skipIf(!up)("catalog writes", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  let staffAuth: Record<string, string>;
+  let productId: string;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values ('${STAFF}', 'staff@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do nothing;
+    `);
+    staffAuth = { Authorization: `Bearer ${await mintToken("authenticated", STAFF)}` };
+  });
+
+  const post = (path: string, body: unknown) =>
+    app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...staffAuth },
+      body: JSON.stringify(body),
+    });
+
+  const patch = (path: string, body: unknown) =>
+    app.request(path, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", ...staffAuth },
+      body: JSON.stringify(body),
+    });
+
+  test("a new product is created as a draft, whatever the caller wants", async () => {
+    const res = await post("/admin/products", {
+      name: "Seam Test Widget",
+      slug: "seam-test-widget",
+      brand: "Testco",
+      description: "Created through the API, which was not possible before.",
+      // Ignored: status is not an input on create.
+      status: "active",
+    });
+    expect(res.status).toBe(201);
+    productId = ((await res.json()) as { id: string }).id;
+
+    expect(await sqlValue(`select status from products where id = '${productId}'`)).toBe("draft");
+  });
+
+  test("a draft is invisible to the storefront until it is published", async () => {
+    const before = await app.request("/catalog/products?q=widget");
+    const hidden = (await before.json()) as { items: { slug: string }[] };
+    expect(hidden.items.map((i) => i.slug)).not.toContain("seam-test-widget");
+
+    expect((await patch(`/admin/products/${productId}`, { status: "active" })).status).toBe(200);
+
+    const after = await app.request("/catalog/products?q=widget");
+    const shown = (await after.json()) as { items: { slug: string }[] };
+    expect(shown.items.map((i) => i.slug)).toContain("seam-test-widget");
+  });
+
+  test("a variant makes it sellable, and starts with no stock", async () => {
+    const res = await post(`/admin/products/${productId}/variants`, {
+      sku: "SEAM-WIDGET-1",
+      title: "Standard",
+      price: 499,
+      compare_at_price: 799,
+      cost_price: 250,
+    });
+    expect(res.status).toBe(201);
+
+    const variantId = ((await res.json()) as { id: string }).id;
+    // inventory_movements is the source of truth; the variant is a cache
+    // of it, so a brand new one is zero and takes stock through the ledger.
+    expect(await sqlValue(`select stock from product_variants where id = '${variantId}'`)).toBe("0");
+    expect(
+      await sqlValue(`select is_purchasable from product_variants where id = '${variantId}'`),
+    ).toBe("f");
+  });
+
+  test("repricing writes price history, in the same transaction", async () => {
+    const variantId = await sqlValue(
+      `select id from product_variants where sku = 'SEAM-WIDGET-1'`,
+    );
+    expect((await patch(`/admin/variants/${variantId}`, { price: 549 })).status).toBe(200);
+
+    // The trigger, not the handler. A disputed order price has to be
+    // answerable months later, and nothing in the route writes this row.
+    const history = await sqlValue(
+      `select count(*) from price_history where variant_id = '${variantId}'`,
+    );
+    expect(Number(history)).toBeGreaterThan(0);
+    expect(await sqlValue(`select price from product_variants where id = '${variantId}'`)).toBe(
+      "549.00",
+    );
+  });
+
+  test("a duplicate slug is a 409, not a 500 quoting the index", async () => {
+    const res = await post("/admin/products", {
+      name: "Seam Test Widget Again",
+      slug: "seam-test-widget",
+    });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.message).not.toMatch(/constraint|index|relation/i);
+  });
+
+  test("the price change is attributed to the staff member who made it", async () => {
+    // api-plan.md rates this High: on the service key auth.uid() is null,
+    // so every price edit is recorded as having been made by nobody. The
+    // only thing standing between this API and that is caller.db.
+    //
+    // Asserted on product_variants, not products: audit_row() is attached
+    // to what carries money -- variants, discounts, gift cards, staff,
+    // settings -- and a product's name and description are not that.
+    const variantId = await sqlValue(
+      `select id from product_variants where sku = 'SEAM-WIDGET-1'`,
+    );
+    const attributed = await sqlValue(
+      `select count(*) from audit_logs
+        where table_name = 'product_variants' and record_id = '${variantId}'
+          and staff_id = '${STAFF}'`,
+    );
+    expect(Number(attributed)).toBeGreaterThan(0);
+  });
+
+  test("a customer cannot create a product", async () => {
+    const res = await app.request("/admin/products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${await mintToken("authenticated", "aaaaaaaa-0000-4000-8000-000000000001")}`,
+      },
+      body: JSON.stringify({ name: "Nope", slug: "nope" }),
+    });
+    expect(res.status).toBe(403);
+  });
+});
