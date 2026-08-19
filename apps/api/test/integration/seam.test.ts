@@ -1259,3 +1259,220 @@ describe.skipIf(!up)("a guest can find their own order", () => {
     }
   });
 });
+
+/**
+ * Store credit, spent.
+ *
+ * credit_ledger has carried an 'order_payment' reason since the
+ * baseline and the table's comment has said "spend it at checkout by
+ * adding a payments row with provider = 'store_credit'". Nothing did:
+ * staff could grant credit, a return could resolve to it, a gift card
+ * could be redeemed into it, and the customer could watch the balance
+ * and never spend a rupee.
+ *
+ * Every assertion here needs a real database. The balance is a sum over
+ * a ledger, the debit and the order have to land in one transaction, and
+ * whether capture_payment() still refuses a wrong amount after the rules
+ * changed is not something a handler test can answer.
+ */
+describe.skipIf(!up)("store credit pays for orders", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF = "bbbbbbbb-0000-4000-8000-000000000001";
+  const RICH = "aaaaaaaa-0000-4000-8000-00000000000c";
+  let variantId: string;
+  let unitPrice: number;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql(`
+      insert into auth.users (id, email) values
+        ('${STAFF}', 'staff@test.local'), ('${RICH}', 'rich@test.local')
+        on conflict (id) do nothing;
+      insert into customers (id, email, full_name) values
+        ('${RICH}', 'rich@test.local', 'Rich') on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do update set role = 'owner', is_active = true;
+      update store_settings set cod_enabled = true where id = 1;
+    `);
+
+    const list = await app.request("/catalog/products?limit=1");
+    const { items } = (await list.json()) as { items: { slug: string }[] };
+    const detail = await app.request(`/catalog/products/${items[0]!.slug}`);
+    const product = (await detail.json()) as {
+      variants: { id: string; stock: number; price: number }[];
+    };
+    const sellable = product.variants.find((v) => v.stock > 3)!;
+    variantId = sellable.id;
+    unitPrice = sellable.price;
+  });
+
+  const grant = (amount: number) =>
+    sql(`insert into credit_ledger (customer_id, delta, reason, note)
+         values ('${RICH}', ${amount}, 'goodwill', 'test grant');`);
+
+  const balance = async () =>
+    Number(
+      await sqlValue(
+        `select coalesce(sum(delta), 0) from credit_ledger
+          where customer_id = '${RICH}' and (expires_at is null or expires_at > now())`,
+      ),
+    );
+
+  const buy = async (quantity: number, useCredit: boolean) => {
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": `credit-${crypto.randomUUID()}`,
+        Authorization: `Bearer ${await mintToken("authenticated", RICH)}`,
+      },
+      body: JSON.stringify({
+        items: [{ variant_id: variantId, quantity }],
+        email: "rich@test.local",
+        contact_phone: "9876543210",
+        shipping_address: {
+          line1: "1 Test Street",
+          city: "Bengaluru",
+          state: "Karnataka",
+          postal_code: "560001",
+          country: "IN",
+        },
+        payment_method: "cod",
+        use_credit: useCredit,
+      }),
+    });
+    return { status: res.status, body: (await res.json()) as Record<string, number | string> };
+  };
+
+  test("credit is not spent unless it is asked for", async () => {
+    await grant(50);
+    const before = await balance();
+    const { status, body } = await buy(1, false);
+    expect(status).toBe(201);
+    // A customer with a balance may be saving it.
+    expect(body.creditApplied).toBe(0);
+    expect(await balance()).toBe(before);
+  });
+
+  test("a partial balance pays part of the order, and the rest is still owed", async () => {
+    const before = await balance();
+    expect(before).toBeGreaterThan(0);
+
+    const { status, body } = await buy(2, true);
+    expect(status).toBe(201);
+    const grand = Number(body.grandTotal);
+    expect(grand).toBeGreaterThan(before);
+
+    // Capped at the balance, not at what was asked for.
+    expect(body.creditApplied).toBe(before);
+    expect(await balance()).toBe(0);
+
+    // grandTotal still states the order's full value: credit is a way of
+    // paying it, not a discount on it, and the invoice has to agree.
+    const orderId = body.orderId as string;
+    expect(await sqlValue(`select grand_total from orders where id = '${orderId}'`)).toBe(
+      grand.toFixed(2),
+    );
+
+    // The gateway is owed the difference, and that is what its row says.
+    expect(
+      await sqlValue(
+        `select amount from payments where order_id = '${orderId}' and provider = 'cod'`,
+      ),
+    ).toBe((grand - before).toFixed(2));
+    expect(
+      await sqlValue(
+        `select amount from payments where order_id = '${orderId}' and provider = 'store_credit'`,
+      ),
+    ).toBe(before.toFixed(2));
+
+    // Still pending: most of it has not been paid.
+    expect(await sqlValue(`select status from orders where id = '${orderId}'`)).toBe("pending");
+  });
+
+  test("the debit is on the ledger, against the order it paid for", async () => {
+    const spend = await sqlValue(
+      `select count(*) from credit_ledger
+        where customer_id = '${RICH}' and reason = 'order_payment'
+          and delta < 0 and order_id is not null`,
+    );
+    expect(Number(spend)).toBeGreaterThan(0);
+  });
+
+  test("credit covering the whole order pays it outright", async () => {
+    // Enough for one unit, with room to spare.
+    await grant(unitPrice * 5);
+    const { status, body } = await buy(1, true);
+    expect(status).toBe(201);
+
+    const grand = Number(body.grandTotal);
+    expect(body.creditApplied).toBe(grand);
+    // No gateway involved, so there is nothing to wait for.
+    expect(body.status).toBe("paid");
+
+    const orderId = body.orderId as string;
+    // paymentId points at the credit payment rather than being null:
+    // there is a payment, it is just not one anybody has to go and make.
+    expect(
+      await sqlValue(`select provider from payments where id = '${body.paymentId}'`),
+    ).toBe("store_credit");
+    expect(await sqlValue(`select status from orders where id = '${orderId}'`)).toBe("paid");
+    expect(
+      await sqlValue(
+        `select status from payments where order_id = '${orderId}' and provider = 'store_credit'`,
+      ),
+    ).toBe("captured");
+    // No cod row at all: the gateway was never owed anything.
+    expect(
+      await sqlValue(`select count(*) from payments where order_id = '${orderId}' and provider = 'cod'`),
+    ).toBe("0");
+
+    // capture_payment() ran, so the reservation became a sale rather than
+    // sitting until it expired.
+    expect(
+      await sqlValue(
+        `select count(*) from inventory_movements where order_id = '${orderId}' and reason = 'sale'`,
+      ),
+    ).toBe("1");
+  });
+
+  test("asking to spend credit you do not have is not an error", async () => {
+    // Spend whatever the test above left over, rather than assuming a
+    // zero balance: the seed's prices are large, so a grant sized off one
+    // of them leaves change behind.
+    const left = await balance();
+    if (left > 0) {
+      await sql(`insert into credit_ledger (customer_id, delta, reason, note)
+                 values ('${RICH}', ${-left}, 'adjustment', 'test drain');`);
+    }
+    expect(await balance()).toBe(0);
+    const { status, body } = await buy(1, true);
+    expect(status).toBe(201);
+    expect(body.creditApplied).toBe(0);
+    expect(body.status).toBe("pending");
+  });
+
+  test("a guest asking for credit gets none, and still checks out", async () => {
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": `guestcredit-${crypto.randomUUID()}` },
+      body: JSON.stringify({
+        items: [{ variant_id: variantId, quantity: 1 }],
+        email: "nobody@test.local",
+        contact_phone: "9876543210",
+        shipping_address: {
+          line1: "1 Test Street", city: "Bengaluru", state: "Karnataka",
+          postal_code: "560001", country: "IN",
+        },
+        payment_method: "cod",
+        use_credit: true,
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect((await res.json()) as { creditApplied: number }).toMatchObject({ creditApplied: 0 });
+  });
+});

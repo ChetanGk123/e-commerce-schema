@@ -569,8 +569,10 @@ types; both hashers now use `node:crypto`.
 against `hc`" cannot be verified. `packages/client` typechecks, which is the same
 code path.
 
-**Still open** (flagged in B8, in no phase's checklist): checkout cannot *spend*
-store credit. `credit_ledger` has the `order_payment` reason waiting for it.
+**Was still open, now closed**: checkout can spend store credit
+(`20260801002500_credit_at_checkout.sql`). `credit_ledger.order_payment` has a
+caller, the debit happens in the checkout transaction under a per-customer lock,
+and credit covering the whole order marks it paid without a gateway.
 
 ### B13 — Realtime · Low · *scope-guarded*
 

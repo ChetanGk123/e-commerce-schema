@@ -86,6 +86,20 @@ export const checkoutSchema = z.object({
     .max(30)
     .transform((s) => s.trim().toUpperCase())
     .optional(),
+  /**
+   * Spend the signed-in customer's store credit against this order, as
+   * much of it as the balance and the total allow.
+   *
+   * Opt-in, and deliberately so: a customer with a balance may be saving
+   * it for something, and spending it because it happened to be there is
+   * not a decision the checkout gets to make for them. Ignored for
+   * guests, who have no ledger.
+   *
+   * How much was actually spent comes back as `creditApplied` -- it is
+   * capped at the balance, so asking to use credit you do not have is
+   * not an error, it just applies nothing.
+   */
+  use_credit: z.boolean().optional(),
 });
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
 

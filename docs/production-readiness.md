@@ -377,8 +377,33 @@ that were never built, and the seam that nothing tests.**
       here. Registered before `/orders/{id}` — that route's `requireAuth` runs
       ahead of its uuid validation, so second in the chain every guest lookup
       answered 401.
-- [ ] Checkout cannot spend store credit — `credit_ledger.order_payment` is
-      waiting for it (already flagged in `api-plan.md` B12)
+- [x] Checkout can spend store credit — **done**
+      (`20260801002500_credit_at_checkout.sql`). `use_credit: true` on checkout;
+      `creditApplied` comes back. Capped at the balance, so asking for credit
+      you do not have applies nothing rather than failing. Opt-in, because a
+      customer with a balance may be saving it.
+      *Inside the checkout transaction*, like the coupon redemption and the
+      stock reservation, with a lock on the customer row — two checkouts a
+      millisecond apart would otherwise read the same balance and both spend
+      it. The balance rule is copied from `customer_credit_balances`, expiry
+      and all, so the amount spendable and the amount on the customer's screen
+      cannot disagree.
+      *`grandTotal` still states the order's full value*: credit is a way of
+      paying an order, not a discount on it, and the invoice has to agree.
+      *Credit covering the whole order marks it paid outright* by calling
+      `capture_payment()` rather than repeating its ledger moves — so the
+      reservation becomes a sale instead of expiring.
+      *One guard had to be generalised.* `capture_payment()` refused any
+      capture that was not the full `grand_total` — right reasoning, wrong
+      number once credit has already paid part of it. It now compares against
+      what is still outstanding, which is exactly `grand_total` when no credit
+      is in play. The invariant "a short capture is refused, not reconciled"
+      still passes.
+      *And it surfaced a stale overload:* the four-argument
+      `capture_payment()` from `0015` was superseded by the five-argument one
+      in `0017` and never dropped, so a positional four-argument call was
+      ambiguous between them. Nothing had noticed, because PostgREST calls it
+      by name. Dropped.
 - [ ] No address edit: `POST` and `DELETE` only, no `PATCH`
 - [ ] No `GET /admin/customers/{id}` detail — the list, the credit and the
       erasure exist, the customer does not
