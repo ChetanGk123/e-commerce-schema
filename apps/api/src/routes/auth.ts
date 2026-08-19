@@ -48,6 +48,10 @@ async function gotrue(
         ...(init.token ? { Authorization: `Bearer ${init.token}` } : {}),
       },
       body: init.body ? JSON.stringify(init.body) : undefined,
+      // GoTrue gets the same deadline as PostgREST. Without it a hung
+      // auth service holds every sign-in open indefinitely -- and the
+      // catch below already knows what to do with the abort.
+      signal: AbortSignal.timeout(env.SUPABASE_TIMEOUT_MS),
     });
   } catch (err) {
     // The auth service being unreachable is our problem, not the caller's.

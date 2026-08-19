@@ -4,7 +4,11 @@ Gap list for `apps/api` against "a real store takes real orders through this".
 Audited against the code, not against the plan; where the two disagree, the code
 wins and this file says so.
 
-**Status**: #5 done; the rest open
+Finished items stay here rather than being deleted, with what was actually
+wrong and what shipped. Half of what each one taught was not in the original
+entry.
+
+**Status**: #5 and #10 done; the rest open
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -29,7 +33,7 @@ that were never built, and the seam that nothing tests.**
 | # | Gap | Cost of shipping without it |
 |---|---|---|
 | ~~5~~ | ~~Failed webhooks never retried or surfaced~~ | **done** |
-| 10 | No timeout on Supabase calls | One hung PostgREST call hangs a request indefinitely |
+| ~~10~~ | ~~No timeout on Supabase calls~~ | **done** |
 | 7 | No Dockerfile, no CI | Cannot deploy at all |
 | 8 | No graceful shutdown | Every redeploy kills in-flight checkouts |
 | 9 | No readiness probe | A misconfigured instance takes traffic and 500s |
@@ -62,19 +66,25 @@ that were never built, and the seam that nothing tests.**
 - [ ] **4. No shipping zone or rate management.** `/shipping/quote` reads the
       rate tables. Nothing writes them — `setup.md` Step 6 is SQL.
 
-- [x] **5. Failed webhook processing is never retried and never surfaced.** —
-      **done.** `redriveWebhooks()` in `src/jobs.ts` runs on every tick and on
-      `POST /jobs/drain`; `GET /admin/webhooks` reports what it gave up on.
-      `routes/webhooks.ts:30` says re-driving unprocessed rows "is our job
-      (api-plan B11)". B11 shipped the outbox drain and the sweepers, not this.
-      A `payment.captured` whose `capture_payment` call fails transiently is
-      recorded with the error, answered `200` — correctly, the delivery is safe —
-      and then **nothing ever looks at it again**. The customer paid; the order
-      is not paid. `/admin/outbox` monitors mail only.
-      Fixed by replaying the stored payload through the route's own
-      `processEvent`, capped at 20 attempts, with the exhausted rows and their
-      last error on `GET /admin/webhooks`. No migration: `processed_at is null`
-      was already the queue and `idx_webhook_unprocessed` already indexed it.
+- [x] **5. Failed webhook processing was never retried or surfaced.** — **done**,
+      commit `1710849`.
+      *The gap:* `routes/webhooks.ts` deferred re-driving unprocessed rows to
+      B11; B11 shipped the outbox drain and the sweepers and never picked them
+      up. A `payment.captured` whose `capture_payment` failed transiently was
+      recorded with its error, answered `200` — correctly, the delivery is safe
+      — and then nothing looked at it again. The customer had paid; the order
+      said pending, permanently.
+      *The fix:* `redriveWebhooks()` in `src/jobs.ts` replays the stored payload
+      through the route's own `processEvent`, on every tick and on
+      `POST /jobs/drain` (so a `JOBS_INTERVAL_SECONDS=0` deployment gets it from
+      its one cron entry). Capped at 20 attempts, after which
+      `GET /admin/webhooks` names the row and its last error. No migration —
+      `processed_at is null` was already the queue and `idx_webhook_unprocessed`
+      already indexed it.
+      *Found while fixing:* `/admin/outbox` derived "is mail configured" from
+      `RESEND_API_KEY` alone, so B17's SMTP deployments were told nothing would
+      ever be sent — and that false alarm swallowed the real `stalled_sending`
+      one behind it in the warning ladder.
 
 - [ ] **6. Nothing can mark a shipment delivered.** `routes/fulfilment.ts` posts
       and reads shipments; `admin_ship_order` is its only RPC. `shipments.delivered_at`
@@ -91,7 +101,7 @@ that were never built, and the seam that nothing tests.**
       Nixpacks config, no CI workflow anywhere in the repo. The plan's own
       `turbo prune`-on-Bun risk is still unverified.
 
-- [ ] **8. No graceful shutdown.** `stopJobs()` (`src/jobs.ts:158`) is exported
+- [ ] **8. No graceful shutdown.** `stopJobs()` (`src/jobs.ts:293`) is exported
       and called by nobody, and there is no `SIGTERM` handler in the process.
       A redeploy drops in-flight requests mid-checkout. A drain interrupted
       mid-send leaves rows in `sending`, which `requeue_stalled_messages()`
@@ -104,17 +114,33 @@ that were never built, and the seam that nothing tests.**
       `SUPABASE_URL`, or pointed at a dead Kong, passes its health check and
       500s every request it is handed.
 
-- [ ] **10. No timeout on Supabase calls.** `authmail.ts` and `mailer.ts` both
-      use `AbortSignal.timeout`; `src/supabase.ts` creates all three clients with
-      no custom `fetch`, so a hung PostgREST request hangs the Hono request until
-      the client gives up. One wrapper in `supabase.ts` covers anon, caller and
-      service clients at once.
+- [x] **10. Nothing bounded how long a call to Supabase could take.** — **done**,
+      branch `harden/supabase-timeouts`. Needed two layers, not the one this
+      entry originally assumed.
+      *The gap:* neither supabase-js nor `fetch` imposes a deadline, so a server
+      that accepted the connection and then stopped answering held the request
+      open for as long as the caller waited. `gotrue()` in `routes/auth.ts` had
+      the same hole, which meant a hung auth service hung every sign-in.
+      *The fix, layer one:* `src/supabase.ts` wraps all three clients in
+      `SUPABASE_TIMEOUT_MS` (10s), and `gotrue()` takes the same deadline.
+      *The fix, layer two — and the reason this entry was wrong:* **a per-call
+      deadline does not bound a request.** Measured against a black-holed
+      address, supabase-js retries a failed call four times on its own, so a 1s
+      per-call deadline still answered in 11s. `hono/timeout` now caps the whole
+      request at `REQUEST_TIMEOUT_MS` (30s), with `POST /jobs/drain` exempt
+      because a mail batch legitimately outlasts an interactive request.
+      *Answers, instead of a generic 500:* `database_timeout` (504) for one
+      call, `request_timeout` (504) for the whole request,
+      `database_unavailable` (503) for nothing listening. `env.ts` refuses to
+      boot unless the ceiling exceeds the per-call deadline — inverted, the
+      ceiling fires first and `database_timeout` becomes unreachable, so an
+      operator could never tell which of the two was actually wrong.
 
 - [ ] **11. No metrics, no tracing, no alerting.** Structured pino with request
       ids is good for reading one request; "checkout p99" and "5xx in the last
-      hour" are grep questions. The two conditions that should page someone —
-      outbox stalled, webhooks unprocessed — are computed only when a human
-      loads an admin page.
+      hour" are grep questions. The two conditions that should page someone are
+      now both computed — `GET /admin/outbox` and `GET /admin/webhooks` — but
+      only when a human opens the page. Nothing pushes.
 
 - [ ] **12. The rate limiter is per-instance.** Documented honestly in
       `src/limits.ts`, and simply wrong the moment a second container starts.
@@ -151,7 +177,7 @@ that were never built, and the seam that nothing tests.**
 
 ## Verification — where the real risk is
 
-- [ ] **17. There are no integration tests.** The 146 tests in `apps/api/test`
+- [ ] **17. There are no integration tests.** The 223 tests in `apps/api/test`
       never touch Postgres; `supabase/tests/01_invariants.sql` runs against a
       throwaway container with no API in front of it. Nothing exercises the seam
       between them — that `checkout()`'s parameter names match what the route
@@ -179,8 +205,15 @@ that were never built, and the seam that nothing tests.**
 
 ## Order to do it in
 
-1. **#5 and #10** — both lose money, both are small.
-2. **#7, #8, #9** — until these exist there is nothing to deploy.
+1. ~~**#5 and #10**~~ — done. Both lost money, both were small.
+2. **#7, #8, #9** — until these exist there is nothing to deploy. #8 and #9 are
+   an hour each; #7 is the one with an unknown in it (`turbo prune` on Bun).
 3. **#17** — before any of the catalog writes.
 4. **#1–#4** — a lot of new SQL-touching code, which is precisely why #17 comes first.
 5. **#14** — schedule it deliberately; it is a migration, not an afternoon.
+
+Both finished items took longer than the entry predicted, for the same reason:
+the audit named the symptom from reading the code, and the fix only held once
+the behaviour was measured. #5's entry did not know `/admin/outbox` was lying;
+#10's entry assumed one wrapper would do it. Expect the same of the rest — the
+estimates here are a reading, not a measurement.

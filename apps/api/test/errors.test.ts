@@ -24,6 +24,11 @@ const REAL = {
   customerDelete:
     'update or delete on table "customers" violates foreign key constraint "credit_ledger_customer_id_fkey" on table "credit_ledger"',
   rls: 'new row violates row-level security policy for table "reviews"',
+  // These two came from supabase-js rather than Postgres, captured by
+  // pointing a client at a black-holed address and at a closed port with
+  // the deadline from supabase.ts in place.
+  timeout: "TimeoutError: The operation timed out.",
+  unreachable: "Error: Unable to connect. Is the computer able to access the url?",
 } as const;
 
 describe("B2 error mapping — real Postgres messages", () => {
@@ -104,5 +109,42 @@ describe("B2 error mapping — real Postgres messages", () => {
     // how a refusal gets reported to the customer as a success.
     expect(() => throwOnDbError({ message: REAL.oversell })).toThrow();
     expect(() => throwOnDbError({ message: "unrecognised" })).toThrow();
+  });
+});
+
+/**
+ * A call that never came back is not a refusal, and answering it 500 tells
+ * a caller their request was wrong when the truth is "ask again".
+ */
+describe("transport failures answer honestly", () => {
+  test("a deadline is 504, not a generic 500", () => {
+    const mapped = mapDatabaseError({ message: REAL.timeout, code: "" });
+    expect(mapped?.status).toBe(504);
+    expect(mapped?.code).toBe("database_timeout");
+  });
+
+  test("nothing listening is 503", () => {
+    const mapped = mapDatabaseError({ message: REAL.unreachable, code: "" });
+    expect(mapped?.status).toBe(503);
+    expect(mapped?.code).toBe("database_unavailable");
+  });
+
+  test("neither leaks the URL or the stack it came with", () => {
+    for (const message of [REAL.timeout, REAL.unreachable]) {
+      const mapped = mapDatabaseError({ message, details: "at fetch (native)" });
+      expect(mapped?.message).not.toContain("url");
+      expect(mapped?.message).not.toContain("fetch");
+    }
+  });
+
+  test("Postgres's own statement timeout is a different thing entirely", () => {
+    // 57014. It means one query was cancelled, not that the database is
+    // unreachable, so it must not be swept into the transport rules.
+    const mapped = mapDatabaseError({
+      code: "57014",
+      message: "canceling statement due to statement timeout",
+    });
+    expect(mapped?.status).not.toBe(504);
+    expect(mapped?.status).not.toBe(503);
   });
 });

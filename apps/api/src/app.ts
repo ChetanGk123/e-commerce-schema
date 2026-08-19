@@ -1,6 +1,7 @@
 import { swaggerUI } from "@hono/swagger-ui";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
+import { timeout } from "hono/timeout";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
@@ -75,6 +76,34 @@ app.use(
     credentials: true,
     maxAge: 600,
   }),
+);
+
+/**
+ * A ceiling on how long a caller waits, whatever the handler is doing.
+ *
+ * The per-call deadline in supabase.ts bounds one round trip. It does not
+ * bound a handler that makes several, and supabase-js retries a failed
+ * call up to four times by itself -- against a black-holed database a 1s
+ * per-call deadline still took 11 seconds to answer. Without this, "the
+ * database is slow" arrives as "the API never responds", and every
+ * request parked waiting is memory this process cannot reuse.
+ *
+ * The drain is exempt: sending a batch of mail is not an interactive
+ * request and legitimately outlasts this.
+ */
+const requestDeadline = timeout(
+  env.REQUEST_TIMEOUT_MS,
+  // Hono's default is a bare "Gateway Timeout" with no code. Everything
+  // else in this service answers in one envelope, and a client branching
+  // on error.code should not have to special-case this one.
+  () =>
+    new HTTPException(504, {
+      message: "That took too long. Try again.",
+      cause: { code: "request_timeout" },
+    }),
+);
+app.use("*", (c, next) =>
+  c.req.path === "/jobs/drain" ? next() : requestDeadline(c, next),
 );
 
 /**

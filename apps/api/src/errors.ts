@@ -15,7 +15,7 @@ import { HTTPException } from "hono/http-exception";
  */
 
 export interface MappedError {
-  status: 400 | 403 | 404 | 409 | 422 | 500;
+  status: 400 | 403 | 404 | 409 | 422 | 500 | 503 | 504;
   code: string;
   message: string;
 }
@@ -41,6 +41,28 @@ interface Rule {
  * ones.
  */
 const RULES: Rule[] = [
+  // --- transport ---------------------------------------------------------
+  //
+  // Not a refusal at all: the database never answered. These sit first
+  // because they are the only rules matched against a message supabase-js
+  // wrote rather than one Postgres did, and answering them 500 tells a
+  // caller their request was wrong when the truthful answer is "ask again".
+  {
+    // AbortSignal.timeout in supabase.ts. Postgres's own statement timeout
+    // is SQLSTATE 57014 and reads nothing like this, so the two stay apart.
+    match: "timeouterror",
+    status: 504,
+    code: "database_timeout",
+    message: "That took too long. Try again.",
+  },
+  {
+    // Nothing listening, DNS gone, the wrong SUPABASE_URL entirely.
+    match: "unable to connect",
+    status: 503,
+    code: "database_unavailable",
+    message: "The service is temporarily unavailable. Try again shortly.",
+  },
+
   // --- stock -------------------------------------------------------------
   {
     match: "product_variants_stock_check",
