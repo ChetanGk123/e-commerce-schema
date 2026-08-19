@@ -19,13 +19,20 @@
 
 CONTAINER  := ecomm-verify
 PGIMAGE    := postgres:16-alpine
-PGPORT     := 55432
+# Both published ports sit BELOW the ephemeral range (Linux 32768-60999,
+# macOS 49152-65535). 55432 and 55433 were inside it, and on a CI runner
+# an outbound connection had already taken 55432 -- `docker run` then dies
+# with "address already in use" before a single migration runs. Nothing
+# reaches Postgres over this port (every psql call is a docker exec); it
+# is published so a human can attach a client, and moving it costs
+# nothing.
+PGPORT     := 15432
 # The API integration stack: PostgREST in front of the same container, so
 # apps/api can be exercised over HTTP exactly as it runs in production.
 NETWORK    := ecomm-test
 PGRST      := ecomm-postgrest
 PGRSTIMAGE := postgrest/postgrest:v12.2.3
-PGRSTPORT  := 55433
+PGRSTPORT  := 15433
 # Shared by PostgREST and apps/api, as GOTRUE_JWT_SECRET/PGRST_JWT_SECRET
 # are on a real deployment. Throwaway: this stack is destroyed each run.
 JWTSECRET  := integration-only-secret-at-least-32-characters-long
