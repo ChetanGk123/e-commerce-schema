@@ -547,6 +547,14 @@ this properly, because two limiters disagreeing is worse than one.
 `X-Forwarded-For` is read **only** when `TRUSTED_PROXY_HEADER` names it —
 trusting it unconditionally lets any caller pick their own bucket by forging it.
 
+*Sign-in is limited twice, and the second one is not in this process.* Per-IP
+stops one machine; it cannot see a credential list replayed a few tries at a
+time across a thousand addresses, every one inside its own budget. Ten failures
+against one email address in fifteen minutes locks that address for fifteen —
+counted in Postgres (`auth_attempts`), because two containers must not mean two
+counters. See `20260801002800_signin_lockout.sql` for the tradeoffs, including
+the one it costs you.
+
 *The idempotency middleware is not a lock, and checkout keeps its own.* Two
 simultaneous requests with one key both proceed; the second gets a 409 only
 because the first has committed. That is enough for a human clicking twice, which
@@ -694,6 +702,7 @@ than guessing at.
 - [x] `POST /auth/sign-up` · `sign-in` · `refresh` · `sign-out`
 - [x] `POST /auth/password/forgot` · `password/change`
 - [x] Rate limits: sign-in 10, sign-up 15, reset mail 20, password change 10
+- [x] Per-account sign-in lockout: 10 failures / 15 min locks the address for 15 min, across every IP; a completed password reset lifts it
 - [x] **Validate**: a wrong password and an unknown email answer identically; the issued token works on `/orders`; sign-out kills the refresh token; a password change invalidates the old password
 
 **The decision that changed.** B0 had the browser talk to Supabase Auth

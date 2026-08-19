@@ -243,6 +243,10 @@ async function runSweepers(): Promise<void> {
   for (const fn of [
     "release_expired_reservations",
     "sweep_idempotency_keys",
+    // Not housekeeping: auth_attempts grows with an attacker's word
+    // list, so under a spray this is what keeps the defence from
+    // becoming the resource exhaustion.
+    "sweep_auth_attempts",
   ]) {
     const { data, error } = await db.rpc(fn);
     if (error) log.error({ err: error.message, fn }, "jobs.sweeper_failed");
@@ -339,7 +343,40 @@ async function checkOps(): Promise<void> {
       { stuck },
     );
   }
+
+  // Several accounts locked at once is not several people forgetting
+  // their passwords. The lockout stops the attack; this is the half that
+  // makes it visible, which is what the audit actually complained about.
+  const locked = await db
+    .from("auth_attempts")
+    .select("email", { count: "exact", head: true })
+    .gt("locked_until", new Date().toISOString());
+
+  if (locked.error) {
+    log.error({ err: locked.error.message }, "jobs.ops_check_failed");
+    return;
+  }
+  const accounts = locked.count ?? 0;
+  if (accounts >= STUFFING_ACCOUNTS) {
+    log.error({ accounts }, "ops.credential_stuffing");
+    await alert(
+      db,
+      "ops_credential_stuffing",
+      "Several accounts are locked out at once",
+      `${accounts} accounts hit the sign-in lockout. One person forgets their password; this many at once is a credential list being replayed. The accounts are in auth_attempts. Nothing is breached -- the lockout held -- but any customer among them cannot sign in for fifteen minutes and may call about it.`,
+      { accounts },
+    );
+  }
 }
+
+/**
+ * How many simultaneous lockouts stop looking like a bad morning.
+ *
+ * Low on purpose. The cost of being wrong is one notification; the cost
+ * of setting it where only an obvious attack trips it is finding out
+ * from a customer.
+ */
+const STUFFING_ACCOUNTS = 5;
 
 async function alert(
   db: ReturnType<typeof serviceClient>,

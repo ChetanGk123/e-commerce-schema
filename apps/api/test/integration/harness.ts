@@ -57,11 +57,28 @@ export function mintToken(
  * is twelve lines, rather than a fourth container whose only job is a
  * path rewrite.
  */
+/** Makes the stand-in answer a sign-in with 503 instead of 400. */
+export const OUTAGE_PASSWORD = "__auth_service_is_down__";
+
 export function startKongStandIn(): { url: string; stop: () => void } {
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
+
+      // The one GoTrue answer the lockout depends on, and no more than
+      // that. Still not an auth service: the password picks the status,
+      // so a test can ask for "those credentials are wrong" or "the auth
+      // service is having a bad afternoon" and check that only the first
+      // one counts against an account.
+      if (url.pathname.startsWith("/auth/v1/token")) {
+        const body = (await req.json()) as { password?: string };
+        return Response.json(
+          { error: "invalid_grant", error_description: "Invalid login credentials" },
+          { status: body.password === OUTAGE_PASSWORD ? 503 : 400 },
+        );
+      }
+
       const target = new URL(PGRST_URL!);
       url.protocol = target.protocol;
       url.host = target.host;

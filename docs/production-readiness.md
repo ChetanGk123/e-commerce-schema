@@ -8,7 +8,7 @@ Finished items stay here rather than being deleted, with what was actually
 wrong and what shipped. Half of what each one taught was not in the original
 entry.
 
-**Status**: #2–#10, #14, #17 done; #1 and #11 part-done. Every smaller hole is closed. What is left is #12/#13 (infrastructure), #15 (lockout) and #16 (a decision). The API is deployable, the seam is tested, and the store can be run without psql
+**Status**: #2–#10, #14, #15, #17 done; #1 and #11 part-done. Every smaller hole is closed. What is left is #12/#13 (infrastructure) and #16 (a decision). The API is deployable, the seam is tested, and the store can be run without psql
 **Audited**: 2026-08-19, at `B0-B12 + B14-B18 done`
 **Companion**: `docs/api-plan.md` (what was built) · `docs/setup.md` (the deploy runbook)
 
@@ -343,9 +343,29 @@ that were never built, and the seam that nothing tests.**
       a database role per staff role and JWTs carrying it. README.md now says
       exactly this instead of the old blanket caveat.
 
-- [ ] **15. No per-account lockout.** Sign-in is limited per IP at cost 10 of a
-      60/min budget — six attempts a minute from one address. Credential stuffing
-      spread across addresses is invisible to everything here.
+- [x] **15. Per-account lockout** — **done**,
+      `20260801002800_signin_lockout.sql`. Ten failures against one email
+      inside fifteen minutes locks that email for fifteen, whatever addresses
+      the attempts came from. **The word in the original entry that mattered
+      was `invisible`**, and the lock alone would not have fixed it: `jobs.ts`
+      now raises `ops.credential_stuffing` when five accounts are locked at
+      once, which is what a replayed list looks like from in here.
+      *In Postgres, not in process memory* — two containers must not mean two
+      counters, and a lockout a redeploy clears is a lockout with a published
+      expiry. Staff (owner/admin/manager/support) can read the table; a
+      warehouse account cannot, same PII line the role matrix draws on
+      `customers`.
+      *Two things that would have been bugs.* Failures are counted for
+      addresses with **no account**, or the lockout becomes the enumeration
+      oracle every 401 in this service is written to avoid. And only a GoTrue
+      400/401 counts — a 5xx is not a wrong password, and counting it would
+      lock every account that tried at exactly the moment nobody can sign in
+      anyway. Both are tested.
+      **The cost, stated:** anyone who knows your email can lock you out for
+      fifteen minutes. Bounded by the expiry and by a completed password
+      reset, which clears the lock immediately. Not escalating on repeat
+      lockouts — 40 attempts/hour against one account is slow enough, and
+      escalation is where lockouts start hurting customers.
 
 - [ ] **16. `/docs` and `/openapi.json` are public.** Deliberate, and noted in
       `app.ts` as the one line to wrap in an env check if the route map should

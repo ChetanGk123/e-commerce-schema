@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 
 import {
   ALLOWED_ORIGIN,
+  OUTAGE_PASSWORD,
   PGRST_URL,
   configureEnv,
   mintToken,
@@ -1835,5 +1836,161 @@ describe.skipIf(!up)("the storefront catalog is cacheable", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("etag")).toBeNull();
+  });
+});
+
+/**
+ * Sign-in lockout.
+ *
+ * The IP limiter is off in this harness (RATE_LIMIT_PER_MINUTE=0), so
+ * every 429 below comes from the account -- which is the whole point.
+ * The attack this defends against is the one that never trips a per-IP
+ * budget.
+ */
+describe.skipIf(!up)("an account can be locked, and only by real failures", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    ({ app } = await import("../../src/app"));
+    await sql("delete from auth_attempts");
+  });
+
+  const signIn = (email: string, password = "wrong-password") =>
+    app.request("/auth/sign-in", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+
+  const failures = (email: string) =>
+    sqlValue(`select coalesce(max(failures), -1) from auth_attempts where email = '${email}'`);
+
+  const lockedUntil = (email: string) =>
+    sqlValue(`select coalesce(auth_lock_check('${email}')::text, '')`);
+
+  test("nine wrong passwords are a bad morning; the tenth is a lockout", async () => {
+    const email = "lockme@test.local";
+    for (let i = 0; i < 9; i++) {
+      expect((await signIn(email)).status).toBe(401);
+    }
+    // Still answering honestly at nine. A lockout that fires early is one
+    // that fires on customers.
+    expect(await lockedUntil(email)).toBe("");
+    expect(Number(await failures(email))).toBe(9);
+
+    expect((await signIn(email)).status).toBe(401);
+    expect(await lockedUntil(email)).not.toBe("");
+
+    // And the next attempt never reaches the auth service at all.
+    const after = await signIn(email);
+    expect(after.status).toBe(429);
+    expect(((await after.json()) as { error: { code: string } }).error.code).toBe("rate_limited");
+  });
+
+  test("locking resets the count, so one typo later does not re-lock", async () => {
+    // Otherwise a fifteen-minute inconvenience becomes a permanent one for
+    // anybody being targeted: the lock lifts, they mistype once, and they
+    // are locked again.
+    expect(Number(await failures("lockme@test.local"))).toBe(0);
+  });
+
+  test("an address with no account locks exactly the same way", async () => {
+    // If it did not, the lockout would be the enumeration oracle every
+    // other 401 in this service is written to avoid: ten attempts, and
+    // 429-instead-of-401 tells you who banks here.
+    const email = "nobody-has-this@test.local";
+    for (let i = 0; i < 10; i++) await signIn(email);
+    expect((await signIn(email)).status).toBe(429);
+  });
+
+  test("the lock is per address, not per attacker", async () => {
+    // Twenty failures from this process did not touch a third account.
+    // Said the other way round: this is the distinction the IP limiter
+    // cannot make.
+    const email = "untouched@test.local";
+    expect(await lockedUntil(email)).toBe("");
+    expect((await signIn(email)).status).toBe(401);
+  });
+
+  test("an auth service having a bad afternoon locks nobody out", async () => {
+    // The dangerous failure mode. A 5xx from GoTrue is not a wrong
+    // password, and counting it would lock every account that tried at
+    // exactly the moment nobody can sign in anyway.
+    const email = "outage@test.local";
+    for (let i = 0; i < 12; i++) {
+      expect((await signIn(email, OUTAGE_PASSWORD)).status).toBe(401);
+    }
+    expect(await failures(email)).toBe("-1");
+    expect(await lockedUntil(email)).toBe("");
+  });
+
+  test("a stale run starts over rather than accumulating", async () => {
+    // Two typos on Monday and two on Friday are not an attack. The window
+    // is idle-based, so fifteen quiet minutes reset it.
+    const email = "slowtyper@test.local";
+    await signIn(email);
+    await signIn(email);
+    expect(Number(await failures(email))).toBe(2);
+
+    await sql(
+      `update auth_attempts set last_at = now() - interval '20 minutes' where email = '${email}'`,
+    );
+    await signIn(email);
+    expect(Number(await failures(email))).toBe(1);
+  });
+
+  test("a completed password reset is the way out of somebody else's lockout", async () => {
+    const email = "victim@test.local";
+    await sql(
+      `insert into auth_attempts (email, failures, locked_until)
+       values ('${email}', 0, now() + interval '15 minutes')
+       on conflict (email) do update
+         set locked_until = excluded.locked_until, failures = 0`,
+    );
+    expect((await signIn(email)).status).toBe(429);
+
+    // The route calls this once Supabase has accepted the new password.
+    // That the function lifts the lock is the half that belongs here; the
+    // reset flow itself needs a real GoTrue.
+    await sqlValue(`select auth_clear_failures('${email}')`);
+    expect(await lockedUntil(email)).toBe("");
+    expect((await signIn(email)).status).toBe(401);
+  });
+
+  test("the sweeper drops what has gone quiet and keeps a live lock", async () => {
+    // auth_attempts grows with the attacker's word list, so this is not
+    // housekeeping -- it is what stops the defence being the exhaustion.
+    await sql(`
+      delete from auth_attempts;
+      insert into auth_attempts (email, failures, last_at, locked_until) values
+        ('old@test.local',    3, now() - interval '2 hours', null),
+        ('recent@test.local', 3, now(),                      null),
+        ('held@test.local',   0, now() - interval '2 hours', now() + interval '10 minutes');
+    `);
+    expect(await sqlValue("select sweep_auth_attempts()")).toBe("1");
+    expect(
+      await sqlValue("select string_agg(email, ',' order by email) from auth_attempts"),
+    ).toBe("held@test.local,recent@test.local");
+  });
+
+  test("a warehouse account cannot read who is being attacked", async () => {
+    // The same PII line the role matrix draws on `customers`. This is a
+    // list of addresses somebody is currently trying passwords against.
+    const packer = "bbbbbbbb-0000-4000-8000-000000000009";
+    await sql(`
+      insert into auth.users (id, email) values ('${packer}', 'packer@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${packer}', 'packer@test.local', 'warehouse', 'Packer', true)
+        on conflict (id) do update set role = 'warehouse', is_active = true;
+    `);
+    const res = await fetch(`${PGRST_URL}/auth_attempts?select=email`, {
+      headers: { Authorization: `Bearer ${await mintToken("authenticated", packer)}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
   });
 });
