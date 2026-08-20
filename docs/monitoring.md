@@ -132,8 +132,8 @@ refuses to boot with `SUPABASE_URL: Invalid url`.
 `NODE_ENV=production`. In development `logger.ts` sends pino through a
 pino-pretty worker thread, and a worker cannot resolve its target out of
 a single bundled file — the process dies at boot with `DataCloneError:
-The object can not be cloned`, which names nothing useful. The Dockerfile
-carries the long version of this warning.
+The object can not be cloned`, which names nothing useful.
+`apps/api/Dockerfile` carries the long version of this warning.
 
 Order matters: `-e` wins over `--env-file`, which is what makes the
 override work.

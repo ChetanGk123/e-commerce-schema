@@ -230,7 +230,7 @@ that were never built, and the seam that nothing tests.**
 
 ## Operations — nothing is deployable yet
 
-- [x] **7. No deployment artifacts.** — **done**. Multi-stage `Dockerfile`,
+- [x] **7. No deployment artifacts.** — **done**. Multi-stage `apps/api/Dockerfile`,
       `.dockerignore`, and `.github/workflows/ci.yml` (typecheck + `bun test`).
       Built and run for real, not just written.
       *`turbo prune` on Bun is moot, not unverified.* The risk `api-plan.md`
@@ -248,7 +248,7 @@ that were never built, and the seam that nothing tests.**
       **The platform's default stop timeout is not enough.** `docker stop` on
       the default SIGKILLed the drain at 1.1s (exit 137); with an explicit
       `-t 10` it finished in 5.2s (exit 0). Set `stop_grace_period: 45s`
-      wherever this deploys — the Dockerfile says so at the `CMD`.
+      wherever this deploys — `apps/api/Dockerfile` says so at the `CMD`.
       *And one CI caught before CI existed:* `fetch.preconnect` in
       `supabase.ts` was a Bun-only type, and `packages/client` type-checks the
       API's source without `@types/bun` — the same trap B12 hit with

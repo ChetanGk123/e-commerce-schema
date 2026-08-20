@@ -3,6 +3,16 @@
 # The API, built from the monorepo root because @ecom/schema is a
 # workspace sibling and bun install has to see both.
 #
+# LIVES HERE, BUILDS FROM THERE. The file sits beside the app it builds,
+# but its build context is the repo root -- every path below is relative
+# to the root, not to this directory:
+#
+#   docker build -f apps/api/Dockerfile .          production image
+#   docker build -f apps/api/Dockerfile --target dev .
+#
+# The root docker-compose.yml does this for you. .dockerignore stays at
+# the root because that is what the context is.
+#
 # No `turbo prune`. api-plan.md flags prune-on-Bun as an unverified risk,
 # and the whole reason to reach for it -- shipping a smaller install --
 # does not apply here: `bun build` emits one self-contained file, so the
@@ -28,6 +38,36 @@ COPY . .
 
 WORKDIR /repo/apps/api
 RUN bun run build
+
+
+# ---------------------------------------------------------------------
+# Development: hot reload, running the SOURCE.
+#
+# No `COPY . .`. Compose bind-mounts the repo over /repo, so an edit on
+# the host is an edit in the container and `bun --hot` reloads it. Copying
+# source in would only be shadowed by that mount.
+#
+# Dependencies ARE baked in, which is why compose also mounts an anonymous
+# volume at /repo/node_modules: without it the bind mount hides the
+# install done here, and the container starts with whatever the host
+# happens to have -- or nothing at all on a fresh clone.
+FROM oven/bun:1.3.11-slim AS dev
+
+WORKDIR /repo
+
+COPY package.json bun.lock ./
+COPY apps/api/package.json apps/api/
+COPY packages/client/package.json packages/client/
+COPY packages/schema/package.json packages/schema/
+RUN bun install --frozen-lockfile
+
+ENV PORT=3001
+EXPOSE 3001
+
+# `bun`, not `bun run` -- same reason as the CMD at the bottom of this
+# file: with a wrapper as PID 1 the SIGTERM never reaches the server and
+# the drain never runs.
+CMD ["bun", "--hot", "apps/api/src/server.ts"]
 
 
 # ---------------------------------------------------------------------
