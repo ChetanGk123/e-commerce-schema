@@ -42,6 +42,26 @@ JWTSECRET  := integration-only-secret-at-least-32-characters-long
 RESTORE    := ecomm-restore
 RPSQL      := docker exec -i $(RESTORE) psql -U postgres -v ON_ERROR_STOP=1 -q
 PSQL       := docker exec -i $(CONTAINER) psql -U postgres -v ON_ERROR_STOP=1 -q
+
+# Waiting for Postgres, properly.
+#
+# The official image starts a TEMPORARY server so initdb can run, then
+# shuts it down and starts the real one. pg_isready answers yes to that
+# temporary server, so a loop that only asks pg_isready can return while
+# the socket is about to disappear -- and the next psql fails with "No
+# such file or directory", which reads like a broken container rather
+# than a race. Rare on a laptop, reliable on a cold CI runner.
+#
+# "init process complete" is logged only after the temporary server is
+# gone, so the two conditions together are the real check.
+define waitpg
+	for i in $$(seq 1 90); do \
+		docker logs $(1) 2>&1 | grep -q "init process complete" && \
+		docker exec $(1) pg_isready -U postgres >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+endef
+
 MIGRATIONS := $(sort $(wildcard supabase/migrations/*.sql))
 
 .PHONY: help verify test seed psql down types lint bundle verify-bundle stack test-api restore-drill
@@ -57,10 +77,7 @@ verify: down
 	@docker network create $(NETWORK) >/dev/null 2>&1 || true
 	@docker run -d --name $(CONTAINER) --network $(NETWORK) -e POSTGRES_PASSWORD=pw \
 		-p $(PGPORT):5432 $(PGIMAGE) >/dev/null
-	@for i in $$(seq 1 60); do \
-		docker exec $(CONTAINER) pg_isready -U postgres >/dev/null 2>&1 && break; \
-		sleep 1; \
-	done
+	@$(call waitpg,$(CONTAINER))
 	@echo "==> loading local Supabase shim (auth.users, auth.uid, roles)"
 	@$(PSQL) < supabase/tests/00_shim.sql
 	@echo "==> applying migrations"
@@ -156,10 +173,7 @@ restore-drill: seed
 	@docker rm -f $(RESTORE) >/dev/null 2>&1 || true
 	@docker run -d --name $(RESTORE) --network $(NETWORK) -e POSTGRES_PASSWORD=pw \
 		$(PGIMAGE) >/dev/null
-	@for i in $$(seq 1 60); do \
-		docker exec $(RESTORE) pg_isready -U postgres >/dev/null 2>&1 && break; \
-		sleep 1; \
-	done
+	@$(call waitpg,$(RESTORE))
 	@bash scripts/restore.sh $(RESTORE) "$$(cat dist/backup/.last)"
 	@echo "==> fingerprinting both databases"
 	@$(PSQL)  -tA < supabase/tests/02_fingerprint.sql > dist/backup/.source
@@ -189,10 +203,7 @@ verify-bundle: bundle down
 	@echo "==> starting $(PGIMAGE)"
 	@docker run -d --name $(CONTAINER) -e POSTGRES_PASSWORD=pw \
 		-p $(PGPORT):5432 $(PGIMAGE) >/dev/null
-	@for i in $$(seq 1 60); do \
-		docker exec $(CONTAINER) pg_isready -U postgres >/dev/null 2>&1 && break; \
-		sleep 1; \
-	done
+	@$(call waitpg,$(CONTAINER))
 	@$(PSQL) < supabase/tests/00_shim.sql
 	@echo "==> applying dist/schema.sql as a single transaction"
 	@$(PSQL) < dist/schema.sql

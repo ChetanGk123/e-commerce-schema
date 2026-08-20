@@ -3,7 +3,14 @@ import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { requireAuth, requireStaff } from "../auth";
 import { env } from "../env";
 import { throwOnDbError } from "../errors";
-import { REDRIVE_MAX_ATTEMPTS, drainOutbox, redriveWebhooks } from "../jobs";
+import {
+  REDRIVE_MAX_ATTEMPTS,
+  drainOutbox,
+  maybeReconcile,
+  reconcileStorage,
+  redriveWebhooks,
+  surveyStorage,
+} from "../jobs";
 import { mailerConfigured } from "../mailer";
 import { jsonError, validationHook } from "../schemas";
 
@@ -41,6 +48,14 @@ const DrainResult = z
         raced: z.number().int(),
       })
       .openapi("RedriveResult"),
+    /**
+     * Whether the weekly image collection was due this call. `ran:
+     * false` is the normal answer -- it claims its own cadence, so a
+     * cron entry hitting this every minute triggers one pass a week.
+     */
+    reconcile: z
+      .object({ ran: z.boolean(), collected: z.number().int() })
+      .openapi("ReconcileResult"),
   })
   .openapi("DrainResult");
 
@@ -140,6 +155,81 @@ const webhookHealth = createRoute({
   },
 });
 
+/**
+ * The reconciler's report, and its trigger.
+ *
+ * Split because one is safe and the other is not. The report reads and
+ * nothing else -- looking at it records no sighting, so refreshing the
+ * page cannot hurry an object towards being collected. The pass is a
+ * POST because it changes what the next pass will do, even with
+ * `apply: false`.
+ */
+const SurveyShape = {
+  bucketObjects: z.number().int(),
+  referenced: z.number().int(),
+  candidates: z.number().int(),
+  orphans: z.array(z.string()),
+  confirmed: z.array(z.string()),
+  brokenReferences: z.array(z.string()),
+  refused: z.string().nullable(),
+};
+
+const orphanReport = createRoute({
+  method: "get",
+  path: "/admin/storage/orphans",
+  tags: ["admin", "jobs"],
+  summary: "Objects in the bucket that nothing points at",
+  description:
+    "Reads only. Looking does not record a sighting, so this cannot be used to hurry an object towards collection.\n\n`orphans` is everything unreferenced and old enough to consider; `confirmed` is the subset that has already been unreferenced for GC_CONFIRM_DAYS and would be removed by the next applied pass.\n\n`brokenReferences` is the other direction and the more visible failure: rows pointing at objects that are not in the bucket, i.e. broken images on live product pages. Nothing here fixes those -- they are reported so somebody knows.\n\n`refused` non-null means a rail stopped the survey, and no number beside it should be trusted.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  responses: {
+    200: {
+      description: "What a pass would find",
+      content: { "application/json": { schema: z.object(SurveyShape) } },
+    },
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+  },
+});
+
+const runGc = createRoute({
+  method: "post",
+  path: "/admin/storage/gc",
+  tags: ["admin", "jobs"],
+  summary: "Run a collection pass",
+  description:
+    "Records what looks unreferenced now, forgets anything that has stopped looking unreferenced, and -- with `apply: true` -- removes what has been unreferenced for GC_CONFIRM_DAYS.\n\n**There is no backup of the bucket.** Removal is permanent, which is why an object must be seen unreferenced twice a confirmation window apart, and why a set larger than GC_MAX_DELETE refuses the whole pass rather than doing the first hundred of it.\n\n`apply: false` still records sightings. It is a real pass, just one that removes nothing.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ apply: z.boolean().default(false) }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "What the pass did",
+      content: {
+        "application/json": {
+          schema: z.object({
+            ...SurveyShape,
+            collected: z.number().int(),
+            applied: z.boolean(),
+          }),
+        },
+      },
+    },
+    400: jsonError("Invalid body"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Authenticated, but not active staff"),
+  },
+});
+
 /** Constant time, so a wrong secret cannot be found one byte at a time. */
 function secretMatches(given: string): boolean {
   const expected = env.JOBS_SECRET;
@@ -176,7 +266,12 @@ export const jobsRoute = new OpenAPIHono({ defaultHook: validationHook })
     // would be a strange way to fix a webhook that never got applied.
     const mail = await drainOutbox(limit);
     const webhooks = await redriveWebhooks();
-    return c.json({ ...mail, webhooks }, 200);
+    // Rides along for the same reason the redrive does: a deployment
+    // with JOBS_INTERVAL_SECONDS=0 has one cron entry pointed here, and
+    // it claims its own weekly cadence, so calling it on every drain
+    // costs one round trip and answers "not due".
+    const reconcile = await maybeReconcile();
+    return c.json({ ...mail, webhooks, reconcile }, 200);
   })
 
   .openapi(health, async (c) => {
@@ -276,4 +371,19 @@ export const jobsRoute = new OpenAPIHono({ defaultHook: validationHook })
       },
       200,
     );
+  })
+
+  .openapi(orphanReport, async (c) => {
+    const found = await surveyStorage();
+    c.get("log")?.info(
+      { orphans: found.orphans.length, broken: found.brokenReferences.length },
+      "storage.surveyed",
+    );
+    return c.json(found, 200);
+  })
+
+  .openapi(runGc, async (c) => {
+    const { apply } = c.req.valid("json");
+    const result = await reconcileStorage(apply);
+    return c.json(result, 200);
   });

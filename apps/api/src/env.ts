@@ -186,6 +186,28 @@ const schema = z.object({
    *  which is sized for JSON and would reject every photograph. */
   MAX_IMAGE_KB: z.coerce.number().int().min(64).max(51_200).default(5_120),
 
+  /**
+   * The three rails on the image reconciler. It removes objects
+   * unattended from a bucket with no backup, so these are not tuning
+   * knobs -- they are what stands between a bad deploy and permanent
+   * loss. See docs/image-management.md.
+   *
+   * CONFIRM_DAYS: how long an object must keep looking unreferenced
+   * before it is collected. A referenced_objects() that breaks produces
+   * one sighting and nothing more, and the next pass forgets it.
+   *
+   * MIN_AGE_HOURS: never consider an object younger than this. One
+   * uploaded seconds ago may not have a committed row yet, and the
+   * reconciler must not race the request that created it.
+   *
+   * MAX_DELETE: refuse the pass ENTIRELY above this, rather than
+   * collecting the first N. A large set means the reference query broke,
+   * not that there is a lot of rubbish.
+   */
+  GC_CONFIRM_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+  GC_MIN_AGE_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+  GC_MAX_DELETE: z.coerce.number().int().min(1).max(10_000).default(100),
+
   /** Largest request body accepted, in kilobytes. */
   MAX_BODY_KB: z.coerce.number().int().min(1).max(10_240).default(256),
 

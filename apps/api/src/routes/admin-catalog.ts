@@ -1047,6 +1047,27 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
       });
     }
 
+    // Before the upload, not after (T3). The composite foreign key would
+    // refuse this variant anyway -- but by then the bytes are in the
+    // bucket with no row to point at them, and the only thing that would
+    // ever collect them is a reconciler that does not exist yet.
+    const variantId = form.get("variantId");
+    if (typeof variantId === "string" && variantId) {
+      const variant = await caller.db
+        .from("product_variants")
+        .select("id")
+        .eq("id", variantId)
+        .eq("product_id", id)
+        .maybeSingle();
+      throwOnDbError(variant.error);
+      if (!variant.data) {
+        throw new HTTPException(422, {
+          message: "That variant belongs to a different product.",
+          cause: { code: "cross_product_variant" },
+        });
+      }
+    }
+
     const bytes = new Uint8Array(await file.arrayBuffer());
     const kind = sniffImageType(bytes);
     if (!kind) {
@@ -1059,9 +1080,8 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
       });
     }
 
-    const { url } = await uploadImage(id, bytes, kind);
+    const { url } = await uploadImage(`products/${id}`, bytes, kind);
 
-    const variantId = form.get("variantId");
     const position = Number(form.get("position") ?? 0);
     const altText = form.get("altText");
 
@@ -1131,11 +1151,15 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
     throwOnDbError(error);
 
     const path = pathFromUrl((found.data as { url: string }).url);
-    if (path && !(await deleteObject(path))) {
+    if (path && !(await deleteObject(path)).gone) {
       // Not an error for the caller: the image has stopped appearing,
-      // which is what they asked for. The object is now costing a
-      // fraction of a cent until somebody sweeps the bucket.
-      c.get("log")?.warn({ imageId: id, path }, "storage.orphaned_object");
+      // which is what they asked for.
+      //
+      // Nor is it an orphan any more. Migration 0029's trigger queued
+      // this URL the moment the row went, so the sweeper retries it next
+      // tick. Trying inline is still worth one call -- it usually works,
+      // which leaves the queue for the cases that actually need it.
+      c.get("log")?.warn({ imageId: id, path }, "storage.delete_deferred");
     }
 
     return c.body(null, 204);

@@ -2,8 +2,10 @@ import { beforeAll, describe, expect, test } from "bun:test";
 
 import {
   ALLOWED_ORIGIN,
+  BUCKET_KEYS,
   OUTAGE_PASSWORD,
   PGRST_URL,
+  STORAGE_PUBLIC_URL,
   configureEnv,
   mintToken,
   sql,
@@ -1992,5 +1994,581 @@ describe.skipIf(!up)("an account can be locked, and only by real failures", () =
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+  });
+});
+
+/**
+ * Image garbage collection, layer 1 (docs/image-management.md T1).
+ *
+ * The premise the whole design rests on: product_images has two ON
+ * DELETE CASCADE foreign keys, so image rows disappear without the API
+ * ever seeing it. If a cascade did not fire a statement-level trigger
+ * with a transition table, none of this would work and the objects would
+ * be orphaned in silence -- so that is the first thing asserted here.
+ */
+describe.skipIf(!up)("deleted images queue their objects", () => {
+  const PRODUCT = "11111111-0000-4000-8000-00000000ff01";
+  const VARIANT = "11111111-0000-4000-8000-00000000ff02";
+
+  const queued = async () =>
+    (
+      await sqlValue(
+        "select coalesce(string_agg(url, ',' order by url), '') from storage_gc_queue",
+      )
+    )
+      .split(",")
+      .filter(Boolean);
+
+  test("a cascading product delete queues every one of its images", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-cascade', 'GC Cascade', 'active');
+      insert into product_images (product_id, url, position) values
+        ('${PRODUCT}', 'https://img.test/a.jpg', 0),
+        ('${PRODUCT}', 'https://img.test/b.jpg', 1),
+        ('${PRODUCT}', 'https://img.test/c.jpg', 2);
+    `);
+    expect(await queued()).toEqual([]);
+
+    // The delete the API cannot see. One statement, three image rows.
+    await sql(`delete from products where id = '${PRODUCT}'`);
+
+    expect(await queued()).toEqual([
+      "https://img.test/a.jpg",
+      "https://img.test/b.jpg",
+      "https://img.test/c.jpg",
+    ]);
+  });
+
+  test("a cascading variant delete queues the variant's image too", async () => {
+    // The second foreign key, and the easier one to forget: deleting a
+    // colourway takes its photographs with it.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-variant', 'GC Variant', 'active');
+      insert into product_variants (id, product_id, sku, price, status)
+        values ('${VARIANT}', '${PRODUCT}', 'GC-SKU-1', 100, 'active');
+      insert into product_images (product_id, variant_id, url, position)
+        values ('${PRODUCT}', '${VARIANT}', 'https://img.test/variant.jpg', 0);
+    `);
+
+    await sql(`delete from product_variants where id = '${VARIANT}'`);
+    expect(await queued()).toEqual(["https://img.test/variant.jpg"]);
+
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("an object another row still displays is not queued", async () => {
+    // Nothing forbids two rows carrying one URL, and a hand-written
+    // insert in psql is how it happens. Queueing on the first delete
+    // would collect a photograph still on a live product page.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-shared', 'GC Shared', 'active');
+      insert into product_images (product_id, url, position) values
+        ('${PRODUCT}', 'https://img.test/shared.jpg', 0),
+        ('${PRODUCT}', 'https://img.test/shared.jpg', 1);
+    `);
+
+    await sql(`delete from product_images where product_id = '${PRODUCT}' and position = 0`);
+    expect(await queued()).toEqual([]);
+
+    // ...and queued once the last one goes.
+    await sql(`delete from product_images where product_id = '${PRODUCT}'`);
+    expect(await queued()).toEqual(["https://img.test/shared.jpg"]);
+
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("queueing the same object twice is one row, not two", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-dupe', 'GC Dupe', 'active');
+      insert into product_images (product_id, url, position)
+        values ('${PRODUCT}', 'https://img.test/once.jpg', 0);
+    `);
+    await sql(`delete from product_images where product_id = '${PRODUCT}'`);
+
+    // Re-added and deleted again: the object still needs deleting once.
+    await sql(`
+      insert into product_images (product_id, url, position)
+        values ('${PRODUCT}', 'https://img.test/once.jpg', 0);
+      delete from product_images where product_id = '${PRODUCT}';
+    `);
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("1");
+
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("a URL a collection still displays is not queued", async () => {
+    // The bug T10 uncovered. collections.image_url has always been free
+    // text, and pasting a product's photograph into a collection's hero
+    // image is the obvious way to make the collection look like the
+    // thing it collects. Before 0034 the trigger asked only
+    // product_images, so removing the product image queued an object the
+    // collection was still showing -- a broken image on a live
+    // merchandising page, from a delete that looked unrelated.
+    const PROD = "11111111-0000-4000-8000-00000000ff0a";
+    const shared = `${STORAGE_PUBLIC_URL}/products/shared/hero.jpg`;
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-shared-coll', 'Shared', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', '${shared}', 0);
+      insert into collections (name, slug, image_url, position)
+        values ('Hero', 'gc-hero', '${shared}', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+    `);
+
+    await sql(`delete from product_images where product_id = '${PROD}'`);
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("0");
+
+    // ...and queued once the collection lets go of it too.
+    await sql(`delete from collections where slug = 'gc-hero'`);
+    expect(await sqlValue("select url from storage_gc_queue")).toBe(shared);
+
+    await sql(`delete from products where id = '${PROD}'; delete from storage_gc_queue;`);
+  });
+
+  test("replacing a collection's image queues the old one", async () => {
+    const oldUrl = `${STORAGE_PUBLIC_URL}/collections/c1/old.jpg`;
+    const newUrl = `${STORAGE_PUBLIC_URL}/collections/c1/new.jpg`;
+    await sql(`
+      delete from storage_gc_queue;
+      insert into collections (name, slug, image_url, position)
+        values ('Swap', 'gc-swap', '${oldUrl}', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+      update collections set image_url = '${newUrl}' where slug = 'gc-swap';
+    `);
+    expect(await sqlValue("select url from storage_gc_queue")).toBe(oldUrl);
+
+    await sql(`delete from collections where slug = 'gc-swap'; delete from storage_gc_queue;`);
+  });
+
+  test("renaming a collection does not touch its image", async () => {
+    // The trigger fires on the column, not the row. A collection edited
+    // forty times keeps its picture.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into collections (name, slug, image_url, position)
+        values ('Keep', 'gc-keep', '${STORAGE_PUBLIC_URL}/collections/c2/keep.jpg', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+      update collections set name = 'Renamed' where slug = 'gc-keep';
+    `);
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("0");
+
+    await sql(`delete from collections where slug = 'gc-keep'; delete from storage_gc_queue;`);
+  });
+
+  test("a warehouse account cannot read the backlog", async () => {
+    // The same PII line drawn everywhere else: these URLs map the
+    // catalog, including products deleted before they ever launched.
+    const packer = "bbbbbbbb-0000-4000-8000-000000000009";
+    const res = await fetch(`${PGRST_URL}/storage_gc_queue?select=url`, {
+      headers: { Authorization: `Bearer ${await mintToken("authenticated", packer)}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+});
+
+/**
+ * Image garbage collection, layer 2 (docs/image-management.md T2).
+ *
+ * The queue says what to collect; this is the part that takes a batch
+ * and reports back. Two things carry the risk and both are asserted:
+ * claiming must cancel anything that has been referenced again since it
+ * was queued, and settling must only drop a row once the object is
+ * genuinely gone.
+ */
+describe.skipIf(!up)("the collection queue drains", () => {
+  const PRODUCT = "11111111-0000-4000-8000-00000000ff03";
+
+  const rows = () =>
+    sqlValue(
+      "select coalesce(string_agg(url || ':' || attempts, ',' order by url), '') from storage_gc_queue",
+    );
+
+  const claim = (limit = 50, giveUp = 20) =>
+    sqlValue(
+      `select coalesce(string_agg(url, ',' order by url), '') from claim_storage_gc(${limit}, ${giveUp})`,
+    );
+
+  test("claiming returns the batch and spends an attempt", async () => {
+    // Incremented on claim, not on failure: a worker that dies mid-batch
+    // still burns one, so a row that reliably kills the process cannot
+    // be retried forever.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into storage_gc_queue (url) values
+        ('https://img.test/one.jpg'), ('https://img.test/two.jpg');
+    `);
+    expect(await claim()).toBe("https://img.test/one.jpg,https://img.test/two.jpg");
+    expect(await rows()).toBe("https://img.test/one.jpg:1,https://img.test/two.jpg:1");
+  });
+
+  test("a URL referenced again is cancelled, not collected", async () => {
+    // The failure this prevents is the expensive one: an image
+    // re-uploaded between the removal and the sweep would otherwise be
+    // taken off a live product page by a queue row nobody remembers.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-claim', 'GC Claim', 'active');
+      insert into storage_gc_queue (url) values ('https://img.test/rescued.jpg');
+      insert into product_images (product_id, url, position)
+        values ('${PRODUCT}', 'https://img.test/rescued.jpg', 0);
+    `);
+
+    expect(await claim()).toBe("");
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("0");
+
+    await sql(`delete from product_images where product_id = '${PRODUCT}'`);
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("a row that has run out of attempts is left alone, not retried", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into storage_gc_queue (url, attempts) values ('https://img.test/stuck.jpg', 20);
+    `);
+    expect(await claim(50, 20)).toBe("");
+    // Still there, with its history intact. Nothing here throws away the
+    // evidence that something has been failing.
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("1");
+  });
+
+  test("settling gone removes the row; settling failed keeps it and says why", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into storage_gc_queue (url) values
+        ('https://img.test/done.jpg'), ('https://img.test/kept.jpg');
+    `);
+    await sqlValue(
+      `select settle_storage_gc((select id from storage_gc_queue where url = 'https://img.test/done.jpg'), true)`,
+    );
+    await sqlValue(
+      `select settle_storage_gc((select id from storage_gc_queue where url = 'https://img.test/kept.jpg'), false, '500 storage said no')`,
+    );
+
+    expect(await sqlValue("select url from storage_gc_queue")).toBe("https://img.test/kept.jpg");
+    expect(await sqlValue("select last_error from storage_gc_queue")).toBe("500 storage said no");
+  });
+
+  test("referenced_objects names both columns that hold image URLs", async () => {
+    // T5. The reconciler removes what is NOT in here, unattended,
+    // against a bucket with no backup -- so a column this forgets is a
+    // column whose images get collected. Both are asserted by name
+    // rather than by count, because a count passes when one replaces
+    // the other.
+    const PROD = "11111111-0000-4000-8000-00000000ff07";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-ref', 'GC Ref', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', 'https://img.test/from-product.jpg', 0);
+      insert into collections (name, slug, image_url, position)
+        values ('GC Coll', 'gc-coll', 'https://img.test/from-collection.jpg', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+    `);
+
+    const refs = (
+      await sqlValue("select string_agg(url, ',' order by url) from referenced_objects()")
+    ).split(",");
+    expect(refs).toContain("https://img.test/from-product.jpg");
+    expect(refs).toContain("https://img.test/from-collection.jpg");
+
+    await sql(`
+      delete from products where id = '${PROD}';
+      delete from collections where slug = 'gc-coll';
+    `);
+  });
+
+  test("one URL on two rows is one reference, not two", async () => {
+    // union rather than union all. The caller only ever asks "is this in
+    // use", and a duplicate would make a set comparison quietly wrong.
+    const PROD = "11111111-0000-4000-8000-00000000ff08";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-dup-ref', 'GC Dup', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position) values
+        ('${PROD}', 'https://img.test/twice.jpg', 0),
+        ('${PROD}', 'https://img.test/twice.jpg', 1);
+    `);
+    expect(
+      await sqlValue(
+        "select count(*) from referenced_objects() where url = 'https://img.test/twice.jpg'",
+      ),
+    ).toBe("1");
+
+    await sql(`delete from products where id = '${PROD}'`);
+  });
+});
+
+/**
+ * The rule the whole retry policy rests on: an object that is already
+ * absent counts as collected.
+ *
+ * Get this wrong and a queue row retries twenty times against a key that
+ * cannot be removed twice, then gives up and raises an alert about an
+ * object that was gone all along.
+ */
+describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let storage: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let jobs: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF_ID = "bbbbbbbb-0000-4000-8000-000000000001";
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    storage = await import("../../src/storage");
+    jobs = await import("../../src/jobs");
+    ({ app } = await import("../../src/app"));
+
+    await sql(`
+      insert into auth.users (id, email) values ('${STAFF_ID}', 'staff@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF_ID}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do update set role = 'owner', is_active = true;
+    `);
+  });
+
+  test("a successful delete is gone", async () => {
+    expect((await storage.deleteObject("products/p/ok.jpg")).gone).toBe(true);
+  });
+
+  test("an object that was never there is also gone", async () => {
+    // 404 is the desired end state, not a failure.
+    expect((await storage.deleteObject("products/p/missing.jpg")).gone).toBe(true);
+  });
+
+  test("storage having a bad afternoon is not gone", async () => {
+    const res = await storage.deleteObject("products/p/broken.jpg");
+    expect(res.gone).toBe(false);
+    // The reason has to survive into last_error, or the queue fills with
+    // rows nobody can diagnose.
+    expect(res.detail).toContain("500");
+  });
+
+  test("a variant from another product is refused before anything is stored", async () => {
+    // T3. The composite foreign key would refuse the insert anyway --
+    // but by then the bytes are in the bucket with no row to point at
+    // them, and nothing would ever collect them: the trigger only fires
+    // on a row that existed.
+    const OTHER = "11111111-0000-4000-8000-00000000ff04";
+    const MINE = "11111111-0000-4000-8000-00000000ff05";
+    const OTHER_VARIANT = "11111111-0000-4000-8000-00000000ff06";
+    await sql(`
+      insert into products (id, slug, name, status) values
+        ('${MINE}',  'gc-mine',  'Mine',  'active'),
+        ('${OTHER}', 'gc-other', 'Other', 'active')
+        on conflict (id) do nothing;
+      insert into product_variants (id, product_id, sku, price, status)
+        values ('${OTHER_VARIANT}', '${OTHER}', 'GC-OTHER-1', 100, 'active')
+        on conflict (id) do nothing;
+    `);
+
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0])]),
+      "x.jpg",
+    );
+    form.append("variantId", OTHER_VARIANT);
+
+    const res = await app.request(`/admin/products/${MINE}/images`, {
+      method: "POST",
+      body: form,
+      headers: { Authorization: `Bearer ${await mintToken("authenticated", STAFF_ID)}` },
+    });
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "cross_product_variant",
+    );
+
+    await sql(`delete from products where id in ('${MINE}', '${OTHER}')`);
+  });
+
+  test("rail 1: an orphan seen once is not collected", async () => {
+    // The rail that replaces the human. Everything the bucket holds is
+    // unreferenced in this fixture, so a reconciler without a
+    // confirmation window would remove all of it on the first pass.
+    await sql("delete from storage_orphan_sightings");
+    const first = await jobs.reconcileStorage(true);
+    expect(first.orphans.length).toBeGreaterThan(0);
+    expect(first.confirmed).toEqual([]);
+    expect(first.collected).toBe(0);
+
+    // Recorded, though -- that is what makes the second pass possible.
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe(
+      String(first.orphans.length),
+    );
+  });
+
+  test("rail 1: a path that stops looking orphaned forgets its week", async () => {
+    // The failure this exists for: referenced_objects() returning too
+    // little -- a migration mid-flight, a revoked grant -- makes real
+    // images look unreferenced. One pass records them; the next, with
+    // the query working, must clear them rather than collect them.
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+        values ('products/p1/kept.jpg', now() - interval '30 days');
+    `);
+
+    // Reference it again, exactly as a working query would.
+    const PROD = "11111111-0000-4000-8000-00000000ff09";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-rail1', 'Rail1', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', '${STORAGE_PUBLIC_URL}/products/p1/kept.jpg', 0);
+    `);
+
+    const pass = await jobs.reconcileStorage(true);
+    expect(pass.confirmed).not.toContain("products/p1/kept.jpg");
+    // Forgotten, not merely skipped: its clock restarts from zero.
+    expect(
+      await sqlValue(
+        "select count(*) from storage_orphan_sightings where path = 'products/p1/kept.jpg'",
+      ),
+    ).toBe("0");
+
+    await sql(`delete from products where id = '${PROD}'`);
+  });
+
+  test("rail 3: too many at once refuses the whole pass, not the first hundred", async () => {
+    // A set this large means the reference query is wrong. Collecting
+    // "only" the cap is not a safer version of that -- it is the same
+    // accident, smaller, and still permanent.
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select 'products/p1/bulk-' || g || '.jpg', now() - interval '30 days'
+      from generate_series(1, 200) g;
+    `);
+    // Those paths are not in the bucket, so this pass would forget them.
+    // Point the survey at the real ones instead by confirming everything
+    // the bucket holds.
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select unnest(array['products/p1/kept.jpg','products/p1/orphan.jpg','products/p2/deep.jpg']),
+             now() - interval '30 days';
+    `);
+
+    const capped = await jobs.reconcileStorage(true, { maxDelete: 2 });
+    expect(capped.refused).toContain("above GC_MAX_DELETE");
+    expect(capped.collected).toBe(0);
+    expect(capped.applied).toBe(false);
+    // Still there. A refused pass must not quietly remove some of it.
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("3");
+  });
+
+  test("rail 6: a dry pass records but removes nothing", async () => {
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select unnest(array['products/p1/kept.jpg','products/p1/orphan.jpg','products/p2/deep.jpg']),
+             now() - interval '30 days';
+    `);
+    const dry = await jobs.reconcileStorage(false);
+    expect(dry.confirmed.length).toBe(3);
+    expect(dry.collected).toBe(0);
+    expect(dry.applied).toBe(false);
+  });
+
+  test("a confirmed orphan is collected, and only then forgotten", async () => {
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select unnest(array['products/p1/kept.jpg','products/p1/orphan.jpg','products/p2/deep.jpg']),
+             now() - interval '30 days';
+    `);
+    const applied = await jobs.reconcileStorage(true);
+    expect(applied.applied).toBe(true);
+    expect(applied.collected).toBe(3);
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("0");
+  });
+
+  test("registering a job does not claim it", async () => {
+    // T8. A freshly deployed store must not immediately run an
+    // unattended, irreversible collection pass against a bucket it has
+    // only just started filling.
+    await sql("delete from job_runs where job = 'test_job'");
+    expect(await sqlValue("select claim_job_run('test_job', '7 days')")).toBe("f");
+    // ...but the clock is now running.
+    expect(await sqlValue("select count(*) from job_runs where job = 'test_job'")).toBe("1");
+  });
+
+  test("a job that is not due answers false, however often it is asked", async () => {
+    // The tick asks every sixty seconds. If "not due" were expensive or
+    // wrong, that is 1440 wrong answers a day.
+    for (let i = 0; i < 3; i++) {
+      expect(await sqlValue("select claim_job_run('test_job', '7 days')")).toBe("f");
+    }
+  });
+
+  test("a due job is claimed once, and is not due again after", async () => {
+    // What this proves: the claim consumes the window, so the second and
+    // third callers get nothing.
+    //
+    // What it does NOT prove: atomicity under real contention. Three
+    // `docker exec psql` calls are not reliably simultaneous, and a
+    // read-then-write implementation would pass this too. The guarantee
+    // that N containers ticking in the same second cannot all win comes
+    // from claim_job_run being a single statement -- structural, not
+    // reproducible here.
+    await sql(`
+      update job_runs set last_run_at = now() - interval '30 days' where job = 'test_job';
+    `);
+    const results = await Promise.all([
+      sqlValue("select claim_job_run('test_job', '7 days')"),
+      sqlValue("select claim_job_run('test_job', '7 days')"),
+      sqlValue("select claim_job_run('test_job', '7 days')"),
+    ]);
+    expect(results.filter((r) => r === "t")).toHaveLength(1);
+
+    await sql("delete from job_runs where job = 'test_job'");
+  });
+
+  test("the report reads without recording anything", async () => {
+    // A GET that recorded sightings would let anyone refreshing an admin
+    // page advance objects towards deletion.
+    await sql("delete from storage_orphan_sightings");
+    const report = await jobs.surveyStorage();
+    expect(report.orphans.length).toBeGreaterThan(0);
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("0");
+  });
+
+  test("listing the bucket recurses into folders", async () => {
+    // T6, and the reason it is a task at all. Storage's list is
+    // delimiter based: given `products/` it returns one entry per
+    // product folder with a null id, and none of the files inside. A
+    // walk that stops there reports a bucket with no images -- which,
+    // handed to something that removes what nothing references, is not a
+    // wrong report but a wrong deletion.
+    const found = (await storage.listObjects()) as { path: string }[];
+    expect(found.map((f) => f.path).sort()).toEqual([...BUCKET_KEYS].sort());
+  });
+
+  test("a URL from another host resolves to no object at all", async () => {
+    // The sweeper settles these as done without calling storage: there is
+    // nothing of ours to collect, and retrying twenty times against
+    // somebody else's CDN is the wrong kind of persistence.
+    expect(storage.pathFromUrl("https://someone-else.example/img.jpg")).toBeNull();
+    expect(storage.pathFromUrl(`${STORAGE_PUBLIC_URL}/products/p/a.jpg`)).toBe(
+      "products/p/a.jpg",
+    );
   });
 });

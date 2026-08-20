@@ -150,7 +150,12 @@ async function storage(
  * properties.
  */
 export async function uploadImage(
-  productId: string,
+  /**
+   * The folder to put it in -- `products/<id>` or `collections/<id>`.
+   * Supplied by the caller rather than built here, because "which kind
+   * of thing owns this image" is the route's knowledge, not storage's.
+   */
+  prefix: string,
   // Uint8Array<ArrayBuffer>, not bare Uint8Array: the default parameter is
   // ArrayBufferLike, which includes SharedArrayBuffer and is therefore not
   // a BlobPart. It comes from file.arrayBuffer(), so this is a narrowing
@@ -158,7 +163,7 @@ export async function uploadImage(
   bytes: Uint8Array<ArrayBuffer>,
   kind: { ext: string; mime: string },
 ): Promise<{ path: string; url: string }> {
-  const path = `products/${productId}/${crypto.randomUUID()}.${kind.ext}`;
+  const path = `${prefix}/${crypto.randomUUID()}.${kind.ext}`;
   const res = await storage("POST", path, {
     body: new Blob([bytes], { type: kind.mime }),
     contentType: kind.mime,
@@ -181,9 +186,128 @@ export async function uploadImage(
  * product page. So the row goes first and this runs after -- and when it
  * fails, a log line is the only thing that should happen.
  */
-export async function deleteObject(path: string): Promise<boolean> {
+export async function deleteObject(
+  path: string,
+): Promise<{ gone: boolean; detail: string }> {
   const res = await storage("DELETE", path);
-  return res.ok;
+  // `gone` is not "this call removed it". It is "the object is no longer
+  // there", which is equally true when it was already absent. Storage
+  // answers a missing key with 404, and some versions with a 400 whose
+  // body says not found. Both mean the caller has what it asked for, and
+  // treating them as failure is how a queue row retries forever against
+  // something that cannot be removed twice.
+  if (res.ok || res.status === 404) return { gone: true, detail: String(res.status) };
+
+  const body = (await res.text()).slice(0, 300);
+  if (/not[_ ]?found|does not exist/i.test(body)) {
+    return { gone: true, detail: `${res.status} ${body}` };
+  }
+  return { gone: false, detail: `${res.status} ${body}` };
+}
+
+export interface StoredObject {
+  path: string;
+  /** ISO timestamp, or null when Storage did not report one. */
+  createdAt: string | null;
+}
+
+/** Storage's own page cap. Asking for more silently gets you this. */
+const LIST_PAGE = 1000;
+
+/**
+ * Two levels of prefix is all our keys have (products/<id>/<uuid>.ext),
+ * so anything deeper is a loop or somebody else's data. Bounded rather
+ * than trusted: this walks whatever the bucket says is there.
+ */
+const MAX_DEPTH = 4;
+
+interface ListEntry {
+  name: string;
+  /** null marks a folder. This is the whole reason recursion is needed. */
+  id: string | null;
+  created_at: string | null;
+}
+
+async function listPage(prefix: string, offset: number): Promise<ListEntry[]> {
+  const bucket = requireStorage();
+  let res: Response;
+  try {
+    res = await fetch(`${env.SUPABASE_URL}/storage/v1/object/list/${bucket}`, {
+      method: "POST",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prefix,
+        limit: LIST_PAGE,
+        offset,
+        sortBy: { column: "name", order: "asc" },
+      }),
+      signal: AbortSignal.timeout(STORAGE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new HTTPException(502, {
+      message: "The storage service could not be reached. Try again.",
+      cause: { code: "storage_unavailable", db: (err as Error).message },
+    });
+  }
+
+  if (!res.ok) {
+    throw new HTTPException(502, {
+      message: "The bucket could not be listed.",
+      cause: { code: "storage_list_failed", db: `${res.status} ${await res.text()}` },
+    });
+  }
+  return (await res.json()) as ListEntry[];
+}
+
+/**
+ * Every object in the bucket, recursively.
+ *
+ * RECURSION IS NOT OPTIONAL. Storage's list is delimiter-based: given
+ * `products/` it returns one entry per product folder, with `id: null`,
+ * and none of the files inside them. A caller that treats that as the
+ * answer sees a bucket containing no images -- which, handed to a
+ * reconciler that deletes what nothing references, is not a wrong report
+ * but a wrong deletion. It is also the empty-set case rail 4 exists to
+ * refuse.
+ *
+ * The cost is one request per folder, so a catalog with 400 photographed
+ * products is ~400 requests on a weekly job. That is the price of not
+ * putting R2 credentials in this process; if it ever stops being
+ * acceptable, ListObjectsV2 against R2 is recursive in one call and the
+ * tradeoff is written up in docs/image-management.md.
+ */
+export async function listObjects(prefix = ""): Promise<StoredObject[]> {
+  const found: StoredObject[] = [];
+  await walk(prefix, found, 0);
+  return found;
+}
+
+async function walk(prefix: string, found: StoredObject[], depth: number): Promise<void> {
+  if (depth > MAX_DEPTH) {
+    throw new HTTPException(502, {
+      message: "The bucket is nested deeper than this service expects.",
+      cause: { code: "storage_list_too_deep", db: prefix },
+    });
+  }
+
+  for (let offset = 0; ; ) {
+    const page = await listPage(prefix, offset);
+
+    for (const entry of page) {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.id === null) await walk(path, found, depth + 1);
+      else found.push({ path, createdAt: entry.created_at });
+    }
+
+    // A short page is the last page. Paging matters more than it looks:
+    // the default limit is 100, and a catalog is not.
+    if (page.length < LIST_PAGE) return;
+    offset += page.length;
+  }
 }
 
 /**

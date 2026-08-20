@@ -3,6 +3,7 @@ import { publishOps } from "./metrics";
 import { logger as log } from "./logger";
 import { type Message, mailerConfigured, send } from "./mailer";
 import { type RazorpayEvent, processEvent } from "./routes/webhooks";
+import { deleteObject, listObjects, pathFromUrl, storageConfigured } from "./storage";
 import { serviceClient } from "./supabase";
 
 /**
@@ -256,6 +257,321 @@ async function runSweepers(): Promise<void> {
 }
 
 /**
+ * Collecting images nothing points at (docs/image-management.md T2).
+ *
+ * The queue is filled by a trigger, because the removal it reacts to
+ * happens in the database and the API never sees it -- a cascade from a
+ * deleted product takes twelve image rows with it and no handler runs.
+ * See migration 0029.
+ *
+ * Failures are not loud here. An object that will not go costs a
+ * fraction of a cent and stays in the queue with its error; T4 is what
+ * turns a backlog into an alert. What must not happen is the queue
+ * quietly emptying itself on failure, which is why settle only drops the
+ * row once the object is actually gone.
+ */
+const GC_GIVE_UP = 20;
+
+async function sweepStorage(): Promise<void> {
+  // No bucket configured means nothing to collect, and every claimed row
+  // would fail against a URL this deployment cannot resolve.
+  if (!storageConfigured()) return;
+
+  const db = serviceClient();
+  const claimed = await db.rpc("claim_storage_gc", {
+    p_limit: 50,
+    p_give_up: GC_GIVE_UP,
+  });
+  if (claimed.error) {
+    log.error({ err: claimed.error.message }, "jobs.storage_claim_failed");
+    return;
+  }
+
+  const rows = (claimed.data ?? []) as { id: string; url: string; attempts: number }[];
+  if (rows.length === 0) return;
+
+  const settle = (id: string, gone: boolean, error: string | null) =>
+    db.rpc("settle_storage_gc", { p_id: id, p_gone: gone, p_error: error });
+
+  let collected = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    const path = pathFromUrl(row.url);
+
+    // Not one of ours -- an image added by hand pointing at another
+    // host, or one left over from a migration. There is nothing to
+    // collect, and keeping the row would retry twenty times against a
+    // URL we were never entitled to touch.
+    if (!path) {
+      await settle(row.id, true, null);
+      continue;
+    }
+
+    try {
+      const res = await deleteObject(path);
+      await settle(row.id, res.gone, res.gone ? null : res.detail);
+      if (res.gone) collected += 1;
+      else failed += 1;
+    } catch (err) {
+      // deleteObject throws when storage is unreachable at all. That is
+      // a whole-batch condition rather than a bad row, but it is settled
+      // per row so the reason lands somewhere readable.
+      await settle(row.id, false, (err as Error).message);
+      failed += 1;
+    }
+  }
+
+  if (collected > 0) log.info({ collected }, "jobs.storage_collected");
+  if (failed > 0) log.warn({ failed }, "jobs.storage_collect_failed");
+}
+
+/**
+ * The reconciler (docs/image-management.md T7).
+ *
+ * The sweeper above collects objects whose rows were removed. This finds
+ * the ones no row ever recorded -- a crash between upload and insert, a
+ * multipart upload storage never finalised -- by listing the bucket and
+ * subtracting what the database still points at.
+ *
+ * It is also the only thing here capable of deleting every photograph in
+ * the store, running unattended against a bucket with no backup. Six
+ * rails, and the tests for them matter more than this code does.
+ */
+export interface StorageSurvey {
+  bucketObjects: number;
+  referenced: number;
+  /** Old enough to be considered at all -- rail 2. */
+  candidates: number;
+  /** Unreferenced, before the confirmation window is applied. */
+  orphans: string[];
+  /** Rows pointing at objects that are not in the bucket: broken images. */
+  brokenReferences: string[];
+  /** Non-null when a rail refused the pass. Nothing is removed. */
+  refused: string | null;
+}
+
+async function survey(db: ReturnType<typeof serviceClient>): Promise<StorageSurvey> {
+  const empty = (refused: string): StorageSurvey => ({
+    bucketObjects: 0,
+    referenced: 0,
+    candidates: 0,
+    orphans: [],
+    brokenReferences: [],
+    refused,
+  });
+
+  const refs = await db.rpc("referenced_objects");
+  if (refs.error) return empty(`reference query failed: ${refs.error.message}`);
+
+  const urls = ((refs.data ?? []) as { url: string }[]).map((r) => r.url);
+
+  // RAIL 4. Zero references is a broken query, not an empty catalog --
+  // and it is the single input that would mark every object in the
+  // bucket collectable. Refusing here is why the rest can be trusted.
+  if (urls.length === 0) {
+    return empty("referenced_objects() returned nothing, which is a broken query, not an empty catalog");
+  }
+
+  const referencedPaths = new Set(
+    urls.map((u) => pathFromUrl(u)).filter((p): p is string => p !== null),
+  );
+
+  const objects = await listObjects();
+  const inBucket = new Set(objects.map((o) => o.path));
+
+  // RAIL 2. An object uploaded seconds ago may not have a committed row
+  // yet. Considering it would mean racing the request that created it.
+  const cutoff = Date.now() - env.GC_MIN_AGE_HOURS * 3_600_000;
+  const candidates = objects.filter(
+    (o) => !o.createdAt || Date.parse(o.createdAt) < cutoff,
+  );
+
+  return {
+    bucketObjects: objects.length,
+    referenced: referencedPaths.size,
+    candidates: candidates.length,
+    orphans: candidates.filter((o) => !referencedPaths.has(o.path)).map((o) => o.path),
+    // Reported, never acted on. A row pointing at a missing object is a
+    // broken image on a live page -- more visible than an orphan and not
+    // fixable by deleting anything.
+    brokenReferences: [...referencedPaths].filter((p) => !inBucket.has(p)),
+    refused: null,
+  };
+}
+
+/** The report. Reads only -- no sighting is recorded by looking. */
+export async function surveyStorage(): Promise<StorageSurvey & { confirmed: string[] }> {
+  if (!storageConfigured()) {
+    return {
+      bucketObjects: 0,
+      referenced: 0,
+      candidates: 0,
+      orphans: [],
+      brokenReferences: [],
+      refused: "no bucket configured",
+      confirmed: [],
+    };
+  }
+  const db = serviceClient();
+  const found = await survey(db);
+  const seen = await db
+    .from("storage_orphan_sightings")
+    .select("path")
+    .lt("first_seen_at", new Date(Date.now() - env.GC_CONFIRM_DAYS * 86_400_000).toISOString());
+
+  return {
+    ...found,
+    confirmed: ((seen.data ?? []) as { path: string }[]).map((s) => s.path),
+  };
+}
+
+/**
+ * One pass. Records what it sees; removes only what has been seen before.
+ */
+export async function reconcileStorage(
+  apply: boolean,
+  /**
+   * Overrides for the two rails whose defaults are measured in days and
+   * hundreds. Not a feature -- a rail that cannot be exercised is a rail
+   * somebody deletes as dead code, and these two are exactly the ones
+   * that would otherwise need a week and a real catalog to trip.
+   * Production passes nothing.
+   */
+  opts: { maxDelete?: number; confirmDays?: number } = {},
+): Promise<StorageSurvey & { confirmed: string[]; collected: number; applied: boolean }> {
+  const maxDelete = opts.maxDelete ?? env.GC_MAX_DELETE;
+  const confirmDays = opts.confirmDays ?? env.GC_CONFIRM_DAYS;
+  const nothing = (s: StorageSurvey) => ({ ...s, confirmed: [], collected: 0, applied: false });
+
+  if (!storageConfigured()) {
+    return nothing({
+      bucketObjects: 0,
+      referenced: 0,
+      candidates: 0,
+      orphans: [],
+      brokenReferences: [],
+      refused: "no bucket configured",
+    });
+  }
+
+  const db = serviceClient();
+  const found = await survey(db);
+  if (found.refused) {
+    log.error({ refused: found.refused }, "ops.storage_reconcile_refused");
+    await alert(
+      db,
+      "ops_storage_reconcile_refused",
+      "Image collection refused to run",
+      `The pass was abandoned and nothing was removed: ${found.refused}. That is the safe outcome, but it means orphaned images are accumulating until it is fixed.`,
+      { refused: found.refused },
+    );
+    return nothing(found);
+  }
+
+  // RAIL 1. Record this pass and get back only what was already looking
+  // orphaned a confirmation window ago. Anything this pass did NOT see
+  // is forgotten inside the same statement, so a path that came back
+  // starts its week again.
+  const sighted = await db.rpc("record_orphan_sightings", {
+    p_paths: found.orphans,
+    p_confirm: `${confirmDays} days`,
+  });
+  if (sighted.error) {
+    log.error({ err: sighted.error.message }, "jobs.storage_sightings_failed");
+    return nothing({ ...found, refused: `sightings failed: ${sighted.error.message}` });
+  }
+  const confirmed = ((sighted.data ?? []) as { path: string }[]).map((s) => s.path);
+
+  // RAIL 3. Refuse the whole pass, not the first hundred of it. A set
+  // this large means the reference query is wrong in a way rail 4 did
+  // not catch, and collecting "only" a hundred photographs is not a
+  // safer version of that.
+  if (confirmed.length > maxDelete) {
+    const refused = `${confirmed.length} objects confirmed, above GC_MAX_DELETE of ${maxDelete}`;
+    log.error({ confirmed: confirmed.length }, "ops.storage_reconcile_refused");
+    await alert(
+      db,
+      "ops_storage_reconcile_refused",
+      "Image collection refused: too many at once",
+      `${refused}. Nothing was removed. This is what a broken reference query looks like from here -- check referenced_objects() before raising the limit.`,
+      { confirmed: confirmed.length, cap: maxDelete },
+    );
+    return { ...found, confirmed, collected: 0, applied: false, refused };
+  }
+
+  if (!apply || confirmed.length === 0) {
+    return { ...found, confirmed, collected: 0, applied: false };
+  }
+
+  // RAIL 5. Every path, before anything happens to it. With no bucket
+  // backup this log line is the only record the object ever existed.
+  log.info({ paths: confirmed }, "storage.collecting");
+
+  const removed: string[] = [];
+  for (const path of confirmed) {
+    try {
+      if ((await deleteObject(path)).gone) removed.push(path);
+    } catch (err) {
+      log.warn({ path, err: (err as Error).message }, "storage.collect_failed");
+    }
+  }
+
+  // Only what actually went. A failed one keeps its sighting and its
+  // original first_seen_at, so it is retried next pass rather than
+  // starting its week over.
+  if (removed.length > 0) {
+    await db.rpc("forget_orphan_sightings", { p_paths: removed });
+    log.warn({ collected: removed.length }, "ops.storage_reconciled");
+    await alert(
+      db,
+      "ops_storage_reconciled",
+      "Unreferenced images were removed",
+      `${removed.length} object(s) that nothing has pointed at for ${confirmDays} days were removed from the bucket. There is no backup, so this is permanent; the paths are in the logs under storage.collecting.`,
+      { collected: removed.length },
+    );
+  }
+
+  return { ...found, confirmed, collected: removed.length, applied: true };
+}
+
+/**
+ * How often the reconciler runs (T8).
+ *
+ * Paired with GC_CONFIRM_DAYS on purpose: at seven and seven, an object
+ * first seen unreferenced on one pass is collectable by the next. Set
+ * the confirmation window longer and it simply takes more passes, which
+ * is the safe direction to be wrong in.
+ */
+const RECONCILE_EVERY = "7 days";
+
+/**
+ * Runs a pass if one is due, and removes what it finds (decision 1,
+ * 2026-08-20: unattended).
+ *
+ * The claim is atomic because the alternative is every container
+ * starting the weekly pass in the same second, each listing the whole
+ * bucket and racing the rest to delete the same objects.
+ */
+export async function maybeReconcile(): Promise<{ ran: boolean; collected: number }> {
+  if (!storageConfigured()) return { ran: false, collected: 0 };
+
+  const db = serviceClient();
+  const claim = await db.rpc("claim_job_run", {
+    p_job: "storage_reconcile",
+    p_every: RECONCILE_EVERY,
+  });
+  if (claim.error) {
+    log.error({ err: claim.error.message }, "jobs.reconcile_claim_failed");
+    return { ran: false, collected: 0 };
+  }
+  if (claim.data !== true) return { ran: false, collected: 0 };
+
+  const result = await reconcileStorage(true);
+  return { ran: true, collected: result.collected };
+}
+
+/**
  * The two silent failures, said out loud.
  *
  * /admin/outbox and /admin/webhooks compute exactly what is wrong and
@@ -287,6 +603,8 @@ async function checkOps(): Promise<void> {
     webhooksUnprocessed: 0,
     webhooksExhausted: 0,
     authLockouts: 0,
+    storageGcQueued: 0,
+    storageGcStalled: 0,
   };
 
   const outbox = await db.rpc("outbox_health");
@@ -385,6 +703,39 @@ async function checkOps(): Promise<void> {
     );
   }
 
+  // Images nobody points at any more. Depth on its own is not a
+  // problem -- a queue that is working has depth -- so the alert is on
+  // the rows that ran out of attempts, which is a queue that has stopped
+  // and objects being billed for indefinitely.
+  const gcQueued = await db
+    .from("storage_gc_queue")
+    .select("id", { count: "exact", head: true });
+  const gcStalled = await db
+    .from("storage_gc_queue")
+    .select("id", { count: "exact", head: true })
+    .gte("attempts", GC_GIVE_UP);
+
+  if (gcQueued.error || gcStalled.error) {
+    log.error(
+      { err: (gcQueued.error ?? gcStalled.error)?.message },
+      "jobs.ops_check_failed",
+    );
+    return;
+  }
+  snapshot.storageGcQueued = gcQueued.count ?? 0;
+  snapshot.storageGcStalled = gcStalled.count ?? 0;
+
+  if (snapshot.storageGcStalled > 0) {
+    log.error({ stalled: snapshot.storageGcStalled }, "ops.storage_gc_stalled");
+    await alert(
+      db,
+      "ops_storage_gc_stalled",
+      "Images cannot be removed from storage",
+      `${snapshot.storageGcStalled} object(s) gave up after ${GC_GIVE_UP} attempts. Each one is a file nothing displays and the bucket still bills for. The rows are in storage_gc_queue with the reason in last_error -- usually credentials or a bucket that no longer exists.`,
+      { stalled: snapshot.storageGcStalled },
+    );
+  }
+
   // Only on the way out, and only if every query above succeeded. A
   // partial snapshot would publish real outbox numbers next to a zero
   // for a webhook count that failed to load, and a zero on
@@ -452,6 +803,12 @@ export async function startJobs(): Promise<void> {
       await drainOutbox();
       await redriveWebhooks();
       if (!cronOwns) await runSweepers();
+      // Always, cron or not: these make HTTP calls to storage, which
+      // pg_cron cannot do however the retention jobs are scheduled.
+      await sweepStorage();
+      // Claims its own cadence, so calling it every tick is correct and
+      // cheap -- it answers "not due" in one round trip.
+      await maybeReconcile();
       // Last, so it reports on the state the pass above just left.
       await checkOps();
     } catch (err) {

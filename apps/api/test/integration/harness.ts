@@ -101,6 +101,45 @@ export function startKongStandIn(): { url: string; stop: () => void } {
         );
       }
 
+      // Storage, enough of it to pin the one rule the sweeper depends
+      // on: an object that is already absent counts as collected. The
+      // key decides the answer, so a test can ask for "gone", "was never
+      // there" and "storage is having a bad afternoon" and check that
+      // only the last one is worth retrying.
+      // Listing, modelled the way Storage actually behaves: delimiter
+      // based, one level at a time, folders coming back as entries with
+      // a null id. A stand-in that returned every key flat would let a
+      // broken recursive walk pass.
+      if (url.pathname.startsWith("/storage/v1/object/list/")) {
+        const { prefix } = (await req.json()) as { prefix: string };
+        const seen = new Set<string>();
+        const entries: unknown[] = [];
+        const at = prefix ? `${prefix}/` : "";
+
+        for (const key of BUCKET_KEYS) {
+          if (!key.startsWith(at)) continue;
+          const rest = key.slice(at.length);
+          const slash = rest.indexOf("/");
+          if (slash === -1) {
+            entries.push({ name: rest, id: `id-${key}`, created_at: BUCKET_CREATED_AT });
+          } else if (!seen.has(rest.slice(0, slash))) {
+            seen.add(rest.slice(0, slash));
+            entries.push({ name: rest.slice(0, slash), id: null, created_at: null });
+          }
+        }
+        return Response.json(entries, { status: 200 });
+      }
+
+      if (url.pathname.startsWith("/storage/v1/object/")) {
+        if (url.pathname.includes("missing")) {
+          return Response.json({ error: "Object not found" }, { status: 404 });
+        }
+        if (url.pathname.includes("broken")) {
+          return Response.json({ error: "internal" }, { status: 500 });
+        }
+        return Response.json({ Key: url.pathname }, { status: 200 });
+      }
+
       const target = new URL(PGRST_URL!);
       url.protocol = target.protocol;
       url.host = target.host;
@@ -124,6 +163,22 @@ export function startKongStandIn(): { url: string; stop: () => void } {
 /** The browser origin configureEnv() allows. */
 export const ALLOWED_ORIGIN = "https://store.test";
 
+/** Stands in for the R2 custom domain. Image URLs are built from this. */
+export const STORAGE_PUBLIC_URL = "https://img.test";
+
+/**
+ * What the stand-in bucket contains. Nested two deep like the real keys,
+ * so a listing that forgets to recurse finds folders and no files.
+ */
+export const BUCKET_KEYS = [
+  "products/p1/kept.jpg",
+  "products/p1/orphan.jpg",
+  "products/p2/deep.jpg",
+];
+
+/** Old enough to clear any age threshold a test does not want to fight. */
+export const BUCKET_CREATED_AT = "2020-01-01T00:00:00.000Z";
+
 export async function configureEnv(kongUrl: string): Promise<void> {
   process.env.SUPABASE_URL = kongUrl;
   // Real Supabase keys are themselves JWTs carrying the role. supabase-js
@@ -138,6 +193,11 @@ export async function configureEnv(kongUrl: string): Promise<void> {
   // One allowed browser origin, so the caching tests can check that a 304
   // still carries the CORS headers a browser needs to accept it.
   process.env.CORS_ORIGINS = ALLOWED_ORIGIN;
+  // Image storage, pointed at the stand-in above. The public URL matches
+  // the prefix the GC tests queue their fixtures under, so pathFromUrl()
+  // resolves them exactly as it would resolve a real upload.
+  process.env.STORAGE_BUCKET = "test-images";
+  process.env.STORAGE_PUBLIC_URL = STORAGE_PUBLIC_URL;
 }
 
 /** One value back out of the database, for asserting what a trigger did. */
