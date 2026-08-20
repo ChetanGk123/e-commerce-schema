@@ -1,0 +1,107 @@
+# What this repo runs: the API, and the monitoring that watches it.
+#
+#   docker compose up -d
+#
+# SUPABASE IS NOT HERE, deliberately. It is infrastructure this repo
+# targets, not something it contains -- ChetanGk123/dokploy-templates owns
+# that compose, and its own override file says the template is kept
+# byte-identical. Pulling it in would make this repo a fork to reconcile on
+# every Supabase bump, and in production it is Dokploy that runs it, not
+# this file.
+#
+# So Supabase is a PREREQUISITE: start it first, in its own project, and it
+# must be on the same external network named below. docs/development.md has
+# the sequence.
+#
+# The link between the two is `dokploy-network`. The template puts kong on
+# it -- that is what it is for, Traefik reaches kong the same way -- so the
+# API resolves `kong:8000` across the project boundary without either side
+# knowing about the other. It is also exactly how the two meet on Dokploy.
+#
+# monitoring/docker-compose.yml is `include`d rather than copied, because it
+# still has to run standalone on a host where this file does not exist.
+
+name: ecom
+
+include:
+  - path: monitoring/docker-compose.yml
+
+services:
+  api:
+    # apps/api is the only executable workspace -- packages/schema and
+    # packages/client are libraries with no start script and nothing to
+    # run, so neither has a Dockerfile.
+    build:
+      # Context is the REPO ROOT even though the Dockerfile lives in
+      # apps/api: @ecom/schema is a workspace sibling and bun install has
+      # to see bun.lock and packages/ to resolve it.
+      context: .
+      dockerfile: apps/api/Dockerfile
+      # The dev stage runs the source under `bun --hot`. Swap to `runtime`
+      # to run the bundled artifact that actually deploys -- it will not
+      # hot reload, which is the point of it.
+      target: dev
+    volumes:
+      - .:/repo
+      # Anonymous volumes, and they are load-bearing: the bind mount above
+      # would otherwise hide the node_modules the dev stage installed,
+      # leaving the container running on the host's -- or on nothing at
+      # all, on a clone where `bun install` has never run.
+      #
+      # ONE PER WORKSPACE, not just the root. Bun keeps a workspace's own
+      # dependencies under that workspace, so /repo/node_modules holds
+      # only the root devDeps (turbo, typescript) and every package the
+      # API actually imports lives in apps/api/node_modules. Shadowing the
+      # root alone looks like it works, right up until a fresh clone.
+      - /repo/node_modules
+      - /repo/apps/api/node_modules
+      - /repo/packages/schema/node_modules
+      - /repo/packages/client/node_modules
+    ports:
+      - "3001:3001"
+    env_file:
+      # Real keys live here and are gitignored. Values below override it.
+      - apps/api/.env
+    environment:
+      # Container-to-container. apps/api/.env says localhost:8000, which is
+      # correct for `bun run dev` on the host and wrong from inside a
+      # container, where localhost is this container.
+      SUPABASE_URL: http://kong:8000
+
+      # JSON logs, not pino-pretty. This is the setting that decides whether
+      # Grafana's log panel works: `| json | level >= 40` needs one JSON
+      # object per line, and pretty output is not that. Set development here
+      # if you would rather read the terminal than the dashboard -- hot
+      # reload does not care either way.
+      NODE_ENV: production
+
+      # Turns on GET /metrics. Same value as monitoring/secrets/metrics_token,
+      # which Prometheus reads -- Prometheus cannot take a token from the
+      # environment, so the one secret genuinely does need two homes.
+      METRICS_TOKEN: ${METRICS_TOKEN:?run the token step in docs/development.md}
+
+    networks:
+      # default reaches Supabase (kong, db, ...). dokploy-network is where
+      # Prometheus looks: monitoring/docker-compose.yml pins it to
+      # [monitoring, api], and a service that names ANY network stops
+      # joining the default one -- so without this the scrape resolves
+      # nothing and the target sits down while the API is perfectly fine.
+      #
+      # It also happens to be the production topology: on Dokploy, kong and
+      # the API are both on dokploy-network.
+      - default
+      - dokploy-network
+
+    # No `depends_on: kong` any more -- kong belongs to another compose
+    # project and Compose can only wait on services in its own. env.ts
+    # validates at import, so an API started before Supabase is up exits
+    # rather than limping; `restart: unless-stopped` turns that into a
+    # retry instead of a dead container.
+    restart: unless-stopped
+
+networks:
+  # Declared by the included Supabase compose too; repeated here because a
+  # service cannot join a network this file has not named.
+  dokploy-network:
+    name: ${MONITORING_API_NETWORK:-dokploy-network}
+    external: true

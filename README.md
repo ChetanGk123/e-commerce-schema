@@ -80,6 +80,9 @@ supabase/
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
     01_invariants.sql   87 assertions
+docker-compose.yml      the API with hot reload, plus monitoring. Supabase
+                        runs separately — see docs/development.md
+monitoring/             Prometheus, Loki, Grafana — see docs/monitoring.md
 packages/
   schema/               @ecom/schema — TypeScript types, enums and zod
                         schemas shared by every app. database.types.ts is
