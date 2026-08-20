@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generates types/database.types.ts by introspecting a live database.
+Generates packages/schema/database.types.ts by introspecting a live database.
 
 Run via `make types`, which builds a throwaway container from the migrations
 first. Introspection rather than hand-editing, because nullability is the
@@ -66,6 +66,9 @@ TABLES = {
     "price_history": "PriceHistoryEntry",
     "notifications": "Notification",
     "message_log": "MessageLogEntry",
+    # ...Row because `MessageTemplate` is already the key union in ./enums,
+    # which this file imports. Same name would be a duplicate identifier.
+    "message_templates": "MessageTemplateRow",
     "support_tickets": "SupportTicket",
     "ticket_messages": "TicketMessage",
     "product_enquiries": "ProductEnquiry",
@@ -73,6 +76,14 @@ TABLES = {
     "store_settings": "StoreSettings",
     "idempotency_keys": "IdempotencyKey",
     "webhook_events": "WebhookEvent",
+
+    # Operational machinery. Written by triggers and the jobs tick, read by
+    # staff screens only -- no storefront path touches these. Typed anyway
+    # because apps/api reads them, and this file is what stops it guessing.
+    "auth_attempts": "AuthAttempt",
+    "job_runs": "JobRun",
+    "storage_gc_queue": "StorageGcQueueEntry",
+    "storage_orphan_sightings": "StorageOrphanSighting",
 }
 
 VIEWS = {
@@ -116,6 +127,7 @@ ENUMS = {
     ("message_log", "channel"): "MessageChannel",
     ("message_log", "status"): "MessageStatus",
     ("message_log", "template"): "MessageTemplate",
+    ("message_templates", "key"): "MessageTemplate",
     ("support_tickets", "channel"): "TicketChannel",
     ("support_tickets", "category"): "TicketCategory",
     ("support_tickets", "status"): "TicketStatus",
@@ -250,10 +262,10 @@ def main():
         rows="\n".join(f"  {t}: {n};" for t, n in merged.items())
     ))
 
-    with open("types/database.types.ts", "w") as f:
+    with open("packages/schema/database.types.ts", "w") as f:
         f.write("\n".join(parts))
 
-    print(f"==> types/database.types.ts ({len(TABLES)} tables, {len(VIEWS)} views)")
+    print(f"==> packages/schema/database.types.ts ({len(TABLES)} tables, {len(VIEWS)} views)")
 
 
 HEADER = '''/**

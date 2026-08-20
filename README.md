@@ -11,7 +11,7 @@ currently one squashed baseline, with changes added as new migrations beside it.
 
 Setting up a real project? **[docs/setup.md](docs/setup.md)** is the
 step-by-step runbook — schema, first staff user, signup wiring, store
-settings, scheduled jobs, keys.
+settings, scheduled jobs, keys. **[docs/](docs/)** indexes the rest.
 
 ```sh
 make verify   # apply every migration to a throwaway Postgres container
@@ -80,7 +80,11 @@ supabase/
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
     01_invariants.sql   87 assertions
-types/                  TypeScript types — regenerate with `make types`
+packages/
+  schema/               @ecom/schema — TypeScript types, enums and zod
+                        schemas shared by every app. database.types.ts is
+                        generated: regenerate with `make types`
+  client/               @ecom/client — typed `hc` client over the API
 apps/api/               the shared backend — see apps/api/README.md
                         browsable at /docs, importable from /openapi.json
 ```

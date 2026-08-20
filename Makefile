@@ -216,7 +216,7 @@ verify-bundle: bundle down
 
 # Hand-written types drift. This introspects a database built from the
 # migrations, so nullability and column names cannot disagree with what
-# actually ships. types/enums.ts and types/validation.ts stay hand-written --
+# actually ships. packages/schema/enums.ts and .../validation.ts stay hand-written --
 # CHECK constraints are not Postgres enum types, so they cannot be derived.
 types: verify
 	@python3 scripts/gen_types.py

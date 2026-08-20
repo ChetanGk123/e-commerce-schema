@@ -603,6 +603,14 @@ export interface MessageLogEntry {
   claimed_at: string | null;
 }
 
+export interface MessageTemplateRow {
+  key: MessageTemplate;
+  subject: string;
+  body: string;
+  description: string | null;
+  updated_at: string;  // has default
+}
+
 export interface SupportTicket {
   id: string;  // has default
   ticket_number: string;  // has default
@@ -700,6 +708,32 @@ export interface WebhookEvent {
   processed_at: string | null;
   attempts: number;  // has default
   error: string | null;
+}
+
+export interface AuthAttempt {
+  email: string;
+  failures: number;  // has default
+  last_at: string;  // has default
+  locked_until: string | null;
+}
+
+export interface JobRun {
+  job: string;
+  last_run_at: string;  // has default
+}
+
+export interface StorageGcQueueEntry {
+  id: string;  // has default
+  url: string;
+  queued_at: string;  // has default
+  attempts: number;  // has default
+  last_error: string | null;
+}
+
+export interface StorageOrphanSighting {
+  path: string;
+  first_seen_at: string;  // has default
+  last_seen_at: string;  // has default
 }
 
 /* ---------- Views ---------- */
@@ -801,6 +835,7 @@ export interface Tables {
   price_history: PriceHistoryEntry;
   notifications: Notification;
   message_log: MessageLogEntry;
+  message_templates: MessageTemplateRow;
   support_tickets: SupportTicket;
   ticket_messages: TicketMessage;
   product_enquiries: ProductEnquiry;
@@ -808,6 +843,10 @@ export interface Tables {
   store_settings: StoreSettings;
   idempotency_keys: IdempotencyKey;
   webhook_events: WebhookEvent;
+  auth_attempts: AuthAttempt;
+  job_runs: JobRun;
+  storage_gc_queue: StorageGcQueueEntry;
+  storage_orphan_sightings: StorageOrphanSighting;
   storefront_variants: StorefrontVariant;
   public_settings: PublicSettings;
   customer_credit_balances: CustomerCreditBalance;
