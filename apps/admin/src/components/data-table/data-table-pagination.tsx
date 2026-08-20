@@ -35,11 +35,11 @@ export function DataTablePagination<TData>({ table, pageSizes = PAGE_SIZES }: Da
         <div className="flex items-center gap-2">
           <span className="font-medium text-sm">Rows per page</span>
           <Select value={`${pageSize}`} onValueChange={(value) => table.setPageSize(Number(value))}>
-            <SelectTrigger size="sm" className="w-18" aria-label="Rows per page">
+            <SelectTrigger size="sm" className="w-15" aria-label="Rows per page">
               {/* Explicit label: an empty SelectValue only fills in after hydration. */}
               <SelectValue>{pageSize}</SelectValue>
             </SelectTrigger>
-            <SelectContent side="top">
+            <SelectContent side="top" className="p-1">
               {sizes.map((size) => (
                 <SelectItem key={size} value={`${size}`}>
                   {size}
