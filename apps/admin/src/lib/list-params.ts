@@ -55,3 +55,24 @@ export function pageHref(pathname: string, params: ListParams, offset: number): 
   const qs = next.toString();
   return qs ? `${pathname}?${qs}` : pathname;
 }
+
+/**
+ * Turn list state into the query the API expects.
+ *
+ * Two rules live here so no call site has to restate them:
+ *
+ *   `q` is OMITTED when absent, never sent empty -- the API requires at
+ *   least two characters, so `q=""` would fail a page that simply has no
+ *   search term.
+ *
+ *   `limit` and `offset` are NUMBERS. They travel as query text, but the
+ *   route parses them with a coercing number schema, so numbers are what it
+ *   is typed to accept.
+ */
+export function toQuery(params: ListParams): { q?: string; limit: number; offset: number } {
+  return {
+    ...(params.q ? { q: params.q } : {}),
+    limit: params.limit,
+    offset: params.offset,
+  };
+}
