@@ -181,9 +181,23 @@ export async function uploadImage(
  * product page. So the row goes first and this runs after -- and when it
  * fails, a log line is the only thing that should happen.
  */
-export async function deleteObject(path: string): Promise<boolean> {
+export async function deleteObject(
+  path: string,
+): Promise<{ gone: boolean; detail: string }> {
   const res = await storage("DELETE", path);
-  return res.ok;
+  // `gone` is not "this call removed it". It is "the object is no longer
+  // there", which is equally true when it was already absent. Storage
+  // answers a missing key with 404, and some versions with a 400 whose
+  // body says not found. Both mean the caller has what it asked for, and
+  // treating them as failure is how a queue row retries forever against
+  // something that cannot be removed twice.
+  if (res.ok || res.status === 404) return { gone: true, detail: String(res.status) };
+
+  const body = (await res.text()).slice(0, 300);
+  if (/not[_ ]?found|does not exist/i.test(body)) {
+    return { gone: true, detail: `${res.status} ${body}` };
+  }
+  return { gone: false, detail: `${res.status} ${body}` };
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   ALLOWED_ORIGIN,
   OUTAGE_PASSWORD,
   PGRST_URL,
+  STORAGE_PUBLIC_URL,
   configureEnv,
   mintToken,
   sql,
@@ -2111,5 +2112,135 @@ describe.skipIf(!up)("deleted images queue their objects", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([]);
+  });
+});
+
+/**
+ * Image garbage collection, layer 2 (docs/image-management.md T2).
+ *
+ * The queue says what to collect; this is the part that takes a batch
+ * and reports back. Two things carry the risk and both are asserted:
+ * claiming must cancel anything that has been referenced again since it
+ * was queued, and settling must only drop a row once the object is
+ * genuinely gone.
+ */
+describe.skipIf(!up)("the collection queue drains", () => {
+  const PRODUCT = "11111111-0000-4000-8000-00000000ff03";
+
+  const rows = () =>
+    sqlValue(
+      "select coalesce(string_agg(url || ':' || attempts, ',' order by url), '') from storage_gc_queue",
+    );
+
+  const claim = (limit = 50, giveUp = 20) =>
+    sqlValue(
+      `select coalesce(string_agg(url, ',' order by url), '') from claim_storage_gc(${limit}, ${giveUp})`,
+    );
+
+  test("claiming returns the batch and spends an attempt", async () => {
+    // Incremented on claim, not on failure: a worker that dies mid-batch
+    // still burns one, so a row that reliably kills the process cannot
+    // be retried forever.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into storage_gc_queue (url) values
+        ('https://img.test/one.jpg'), ('https://img.test/two.jpg');
+    `);
+    expect(await claim()).toBe("https://img.test/one.jpg,https://img.test/two.jpg");
+    expect(await rows()).toBe("https://img.test/one.jpg:1,https://img.test/two.jpg:1");
+  });
+
+  test("a URL referenced again is cancelled, not collected", async () => {
+    // The failure this prevents is the expensive one: an image
+    // re-uploaded between the removal and the sweep would otherwise be
+    // taken off a live product page by a queue row nobody remembers.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-claim', 'GC Claim', 'active');
+      insert into storage_gc_queue (url) values ('https://img.test/rescued.jpg');
+      insert into product_images (product_id, url, position)
+        values ('${PRODUCT}', 'https://img.test/rescued.jpg', 0);
+    `);
+
+    expect(await claim()).toBe("");
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("0");
+
+    await sql(`delete from product_images where product_id = '${PRODUCT}'`);
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("a row that has run out of attempts is left alone, not retried", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into storage_gc_queue (url, attempts) values ('https://img.test/stuck.jpg', 20);
+    `);
+    expect(await claim(50, 20)).toBe("");
+    // Still there, with its history intact. Nothing here throws away the
+    // evidence that something has been failing.
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("1");
+  });
+
+  test("settling gone removes the row; settling failed keeps it and says why", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into storage_gc_queue (url) values
+        ('https://img.test/done.jpg'), ('https://img.test/kept.jpg');
+    `);
+    await sqlValue(
+      `select settle_storage_gc((select id from storage_gc_queue where url = 'https://img.test/done.jpg'), true)`,
+    );
+    await sqlValue(
+      `select settle_storage_gc((select id from storage_gc_queue where url = 'https://img.test/kept.jpg'), false, '500 storage said no')`,
+    );
+
+    expect(await sqlValue("select url from storage_gc_queue")).toBe("https://img.test/kept.jpg");
+    expect(await sqlValue("select last_error from storage_gc_queue")).toBe("500 storage said no");
+  });
+});
+
+/**
+ * The rule the whole retry policy rests on: an object that is already
+ * absent counts as collected.
+ *
+ * Get this wrong and a queue row retries twenty times against a key that
+ * cannot be removed twice, then gives up and raises an alert about an
+ * object that was gone all along.
+ */
+describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let storage: any;
+
+  beforeAll(async () => {
+    const kong = startKongStandIn();
+    await configureEnv(kong.url);
+    storage = await import("../../src/storage");
+  });
+
+  test("a successful delete is gone", async () => {
+    expect((await storage.deleteObject("products/p/ok.jpg")).gone).toBe(true);
+  });
+
+  test("an object that was never there is also gone", async () => {
+    // 404 is the desired end state, not a failure.
+    expect((await storage.deleteObject("products/p/missing.jpg")).gone).toBe(true);
+  });
+
+  test("storage having a bad afternoon is not gone", async () => {
+    const res = await storage.deleteObject("products/p/broken.jpg");
+    expect(res.gone).toBe(false);
+    // The reason has to survive into last_error, or the queue fills with
+    // rows nobody can diagnose.
+    expect(res.detail).toContain("500");
+  });
+
+  test("a URL from another host resolves to no object at all", async () => {
+    // The sweeper settles these as done without calling storage: there is
+    // nothing of ours to collect, and retrying twenty times against
+    // somebody else's CDN is the wrong kind of persistence.
+    expect(storage.pathFromUrl("https://someone-else.example/img.jpg")).toBeNull();
+    expect(storage.pathFromUrl(`${STORAGE_PUBLIC_URL}/products/p/a.jpg`)).toBe(
+      "products/p/a.jpg",
+    );
   });
 });

@@ -3,6 +3,7 @@ import { publishOps } from "./metrics";
 import { logger as log } from "./logger";
 import { type Message, mailerConfigured, send } from "./mailer";
 import { type RazorpayEvent, processEvent } from "./routes/webhooks";
+import { deleteObject, pathFromUrl, storageConfigured } from "./storage";
 import { serviceClient } from "./supabase";
 
 /**
@@ -256,6 +257,76 @@ async function runSweepers(): Promise<void> {
 }
 
 /**
+ * Collecting images nothing points at (docs/image-management.md T2).
+ *
+ * The queue is filled by a trigger, because the removal it reacts to
+ * happens in the database and the API never sees it -- a cascade from a
+ * deleted product takes twelve image rows with it and no handler runs.
+ * See migration 0029.
+ *
+ * Failures are not loud here. An object that will not go costs a
+ * fraction of a cent and stays in the queue with its error; T4 is what
+ * turns a backlog into an alert. What must not happen is the queue
+ * quietly emptying itself on failure, which is why settle only drops the
+ * row once the object is actually gone.
+ */
+const GC_GIVE_UP = 20;
+
+async function sweepStorage(): Promise<void> {
+  // No bucket configured means nothing to collect, and every claimed row
+  // would fail against a URL this deployment cannot resolve.
+  if (!storageConfigured()) return;
+
+  const db = serviceClient();
+  const claimed = await db.rpc("claim_storage_gc", {
+    p_limit: 50,
+    p_give_up: GC_GIVE_UP,
+  });
+  if (claimed.error) {
+    log.error({ err: claimed.error.message }, "jobs.storage_claim_failed");
+    return;
+  }
+
+  const rows = (claimed.data ?? []) as { id: string; url: string; attempts: number }[];
+  if (rows.length === 0) return;
+
+  const settle = (id: string, gone: boolean, error: string | null) =>
+    db.rpc("settle_storage_gc", { p_id: id, p_gone: gone, p_error: error });
+
+  let collected = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    const path = pathFromUrl(row.url);
+
+    // Not one of ours -- an image added by hand pointing at another
+    // host, or one left over from a migration. There is nothing to
+    // collect, and keeping the row would retry twenty times against a
+    // URL we were never entitled to touch.
+    if (!path) {
+      await settle(row.id, true, null);
+      continue;
+    }
+
+    try {
+      const res = await deleteObject(path);
+      await settle(row.id, res.gone, res.gone ? null : res.detail);
+      if (res.gone) collected += 1;
+      else failed += 1;
+    } catch (err) {
+      // deleteObject throws when storage is unreachable at all. That is
+      // a whole-batch condition rather than a bad row, but it is settled
+      // per row so the reason lands somewhere readable.
+      await settle(row.id, false, (err as Error).message);
+      failed += 1;
+    }
+  }
+
+  if (collected > 0) log.info({ collected }, "jobs.storage_collected");
+  if (failed > 0) log.warn({ failed }, "jobs.storage_collect_failed");
+}
+
+/**
  * The two silent failures, said out loud.
  *
  * /admin/outbox and /admin/webhooks compute exactly what is wrong and
@@ -452,6 +523,9 @@ export async function startJobs(): Promise<void> {
       await drainOutbox();
       await redriveWebhooks();
       if (!cronOwns) await runSweepers();
+      // Always, cron or not: this one makes HTTP calls to storage, which
+      // pg_cron cannot do however the retention jobs are scheduled.
+      await sweepStorage();
       // Last, so it reports on the state the pass above just left.
       await checkOps();
     } catch (err) {

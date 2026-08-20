@@ -204,7 +204,23 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
     **not** queued, re-adding and re-removing stays one row, and a warehouse account cannot
     read the backlog
 
-- [ ] **T2. `claim_storage_gc(p_limit)` and the sweeper** — migration + `apps/api/src/jobs.ts`
+- [x] **T2. `claim_storage_gc(p_limit)` and the sweeper** — **done**,
+  `supabase/migrations/20260801003000_storage_gc_claim.sql` + `apps/api/src/jobs.ts`
+  - **Cancellation moved into the claim.** Between queueing and sweeping, somebody can
+    re-upload the photograph that was removed by mistake. Collecting it then takes a
+    picture off a live product page, and the queue row is the only thing that still says
+    to — so `claim_storage_gc` drops any row whose URL is referenced again *before*
+    returning a batch. It has to be true at claim time, not queue time
+  - **No `status` column, unlike the outbox.** Removing the same object twice is
+    idempotent — the second attempt gets "not found", which is the state being asked for —
+    so two drainers racing costs one wasted call rather than a duplicate email
+  - **`deleteObject` returns `{ gone, detail }` instead of a boolean.** A 404 is success,
+    not failure; treating it otherwise is how a row retries twenty times against a key
+    that cannot be removed twice, then alerts about an object that was gone all along
+  - A URL from another host settles as done without calling storage at all
+  - *Acceptance*: **met.** Eight tests — claim spends an attempt, a re-referenced URL is
+    cancelled, an exhausted row is left alone with its history, settle drops on gone and
+    keeps the reason on failure, and 200/404/500 from storage are told apart
   - `FOR UPDATE SKIP LOCKED`, mirroring `claim_outbox`
   - Runs on the jobs tick, after `drainOutbox()`
   - Success → row gone. Failure → `attempts + 1`, `last_error` set, retried next tick

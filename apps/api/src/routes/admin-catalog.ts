@@ -1131,11 +1131,15 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
     throwOnDbError(error);
 
     const path = pathFromUrl((found.data as { url: string }).url);
-    if (path && !(await deleteObject(path))) {
+    if (path && !(await deleteObject(path)).gone) {
       // Not an error for the caller: the image has stopped appearing,
-      // which is what they asked for. The object is now costing a
-      // fraction of a cent until somebody sweeps the bucket.
-      c.get("log")?.warn({ imageId: id, path }, "storage.orphaned_object");
+      // which is what they asked for.
+      //
+      // Nor is it an orphan any more. Migration 0029's trigger queued
+      // this URL the moment the row went, so the sweeper retries it next
+      // tick. Trying inline is still worth one call -- it usually works,
+      // which leaves the queue for the cases that actually need it.
+      c.get("log")?.warn({ imageId: id, path }, "storage.delete_deferred");
     }
 
     return c.body(null, 204);
