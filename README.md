@@ -52,7 +52,10 @@ migration — that is the one thing a combined file cannot do for you.
 ```
 supabase/
   migrations/           applied in filename order, each wrapped in a transaction
-    ..._baseline        the whole schema, squashed. Sections, in order:
+    ..._baseline        the whole schema, squashed into one file. Grep a
+                        `-- SOURCE:` header to find the migration a section
+                        came from; git history has each as its own file.
+                        Sections, in order:
                           extensions      citext, pg_trgm, btree_gist, pgcrypto
                           functions_base  table-independent helpers
                           identity        staff_users, customers, addresses, consent
@@ -64,15 +67,34 @@ supabase/
                           indexes         access paths
                           views_rls_grants  storefront views + Row Level Security
                           auth_signup     auth.users -> customers on signup (Supabase only)
-    ..._admin_rpc       operations that must be atomic (capture, ship, invoice)
-    ..._catalog         search_products, shipping_quote
-    ..._checkout        checkout(), apportion_taxable()
-    ..._payments        webhook recording, capture, failure
-    ..._inventory       sweepers, manual stock movements, reservation monitor
-    ..._returns_wallet  returns, refunds, store credit, gift cards
-    ..._invoicing       credit notes, the e-invoice stamp
-    ..._support         erasure guard, tickets, SLA clock
-    ..._jobs            the outbox drain: claim, settle, rescue
+                          admin_rpc       operations that must be atomic (capture, ship, invoice)
+                          catalog         search_products, shipping_quote
+                          checkout        checkout(), apportion_taxable()
+                          payments        webhook recording, capture, failure
+                          inventory       sweepers, manual stock movements, reservation monitor
+                          returns_wallet  returns, refunds, store credit, gift cards
+                          invoicing       credit notes, the e-invoice stamp
+                          support         erasure guard, tickets, SLA clock
+                          jobs            the outbox drain: claim, settle, rescue
+                          message_templates  editable email copy, overrides only
+                          delivery        courier handoff and delivery state
+                          role_matrix     has_staff_role() and per-role grants
+                          category_tree   reparenting with a cycle guard
+                          credit_at_checkout  apply_store_credit()
+                          customer_cancel cancel_own_order()
+                          ops_alerts      raise_ops_alert(), deduped on unread
+                          signin_lockout  auth_attempts, per-account failure counting
+                          storage_gc      orphaned image objects, queued on delete
+                          storage_gc_claim  claim/settle for the sweeper
+                          referenced_objects  what is still in use
+                          orphan_sightings  two-pass confirmation before collecting
+                          job_runs        claim_job_run(), so two containers cannot both win
+                          collection_images  collection artwork, same GC path
+                          pdf_url_unused  stops advertising a PDF that was never written
+
+                        A change to an existing database goes in a NEW
+                        migration beside this file. This one only knows how
+                        to create things.
   jobs/retention.sql    cron.schedule calls only — the sweeper FUNCTIONS are
                         in the migrations, because a file nothing applies is
                         a function that quietly does not exist
@@ -82,6 +104,7 @@ supabase/
     01_invariants.sql   87 assertions
 docker-compose.yml      the API with hot reload, plus monitoring. Supabase
                         runs separately — see docs/development.md
+docker-compose.prod.yml override for deploying — see docs/deployment.md
 monitoring/             Prometheus, Loki, Grafana — see docs/monitoring.md
 packages/
   schema/               @ecom/schema — TypeScript types, enums and zod
