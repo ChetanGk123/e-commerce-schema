@@ -1,4 +1,4 @@
-import { STAFF_ROLES } from "@ecom/schema/enums";
+import { ROLES, STAFF_ROLES } from "@ecom/schema/enums";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
@@ -21,7 +21,7 @@ import { serviceClient } from "../supabase";
  * WHAT THE ROLE CHECK IS WORTH, per route, because it differs:
  *
  * - Creating: a real boundary. Making an auth user needs the service
- *   key, which lives only in this process, so `requireRole("owner")` is
+ *   key, which lives only in this process, so `requireRole(ROLES.OWNER)` is
  *   the only thing between a support account and minting an owner.
  * - Reading and updating: UX. `staff_all` covers every table in public,
  *   `staff_users` included, so any active staff member can already read
@@ -77,7 +77,7 @@ const list = createRoute({
   description:
     "Owner-gated to match the admin's staff screen, but be clear about what that is worth: `staff_all` grants every active staff member read and write on `staff_users` through PostgREST directly. This shapes the surface, it does not contain anyone.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER)] as const,
   request: {
     query: z.object({
       include_inactive: z.coerce.boolean().default(false),
@@ -110,7 +110,7 @@ const create = createRoute({
   description:
     "Creates the auth user on the service key, then the `staff_users` row as the calling owner so `audit_logs` records who granted the access.\n\nThe password is set here rather than emailed as an invite: this stack's mail provider is optional and unproven (api-plan B11 drained the outbox against a real 401 from Resend), and an invite that silently never arrives is a staff member who cannot sign in with nothing to show for it. Hand it over out of band; they can change it through the normal Supabase password reset.\n\n`email_confirm` is set, because a self-hosted stack with no SMTP would otherwise leave the account unable to sign in until someone confirms an email that was never sent.\n\nNote that the new auth user also gets a `customers` row, from the `handle_new_user` trigger. That is deliberate and predates this endpoint: the two tables are separate roles for one person.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER)] as const,
   request: {
     body: {
       content: {
@@ -148,7 +148,7 @@ const update = createRoute({
   description:
     "Deactivation is the delete. `audit_logs.staff_id` and `inventory_movements.created_by` point at these rows, so removing one would take the trail with it -- `is_active = false` is what `requireStaff` checks, and it takes effect on the next request.\n\nAn owner cannot change their own row. That single rule is also what guarantees the store can never be locked out: since no owner can demote or deactivate themselves, at least one active owner always remains. Ask another owner.\n\nEmail and password are not editable here. Both live on the auth user rather than this row, and changing them is a Supabase Auth operation the account holder does for themselves.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER)] as const,
   request: {
     params: z.object({ id: z.string().uuid() }),
     body: {
