@@ -2,6 +2,7 @@
 
 import { EllipsisVertical, LogOut } from "lucide-react";
 
+import { signOut } from "@/app/(auth)/_actions/sign-out";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -67,11 +68,16 @@ export function NavUser({ user }: { readonly user: NavUserProfile }) {
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            {/* TODO: wire to your auth provider. Add Account/Billing/etc. as your app needs them. */}
-            <DropdownMenuItem>
-              <LogOut />
-              Log out
-            </DropdownMenuItem>
+            {/* A form, not an onClick fetch: the Server Action clears an httpOnly
+                cookie, which script on this page cannot touch. */}
+            <form action={signOut}>
+              <DropdownMenuItem asChild>
+                <button type="submit" className="w-full cursor-pointer">
+                  <LogOut />
+                  Log out
+                </button>
+              </DropdownMenuItem>
+            </form>
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>

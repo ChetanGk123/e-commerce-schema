@@ -6,6 +6,7 @@ import { AppSidebar } from "@/app/dashboard/_components/sidebar/app-sidebar";
 import { Separator } from "@/components/ui/separator";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { users } from "@/data/users";
+import { requireStaff } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 import { AccountSwitcher } from "./_components/header/account-switcher";
@@ -13,6 +14,13 @@ import { SearchDialog } from "./_components/header/search-dialog";
 import { ThemeSwitcher } from "./_components/header/theme-switcher";
 
 export default async function Layout({ children }: Readonly<{ children: ReactNode }>) {
+  // THE gate. proxy.ts only checks a cookie exists; this asks the API who the
+  // caller actually is, and a customer's perfectly valid token has no
+  // staff_users row -- so /me answers 403 and this sends them to
+  // /unauthorized. One call per request: getStaff is React-cached, so the
+  // sidebar asking again below costs nothing.
+  const staff = await requireStaff();
+
   const cookieStore = await cookies();
   const defaultOpen = cookieStore.get("sidebar_state")?.value !== "false";
 
@@ -34,7 +42,7 @@ export default async function Layout({ children }: Readonly<{ children: ReactNod
       >
         Skip to content
       </a>
-      <AppSidebar variant="inset" collapsible="icon" />
+      <AppSidebar variant="inset" collapsible="icon" role={staff.role} />
       <SidebarInset
         className={cn(
           "peer-data-[variant=inset]:border",

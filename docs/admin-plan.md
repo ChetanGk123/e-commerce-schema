@@ -5,7 +5,7 @@ storefront. Tick boxes as work lands, update **Status** and the Progress table a
 bottom. Anything discovered mid-build that contradicts this file: fix the file, don't work
 around it.
 
-**Status**: `Phase 0 done -- apps/admin builds, runs and reaches the API. Phase 1 next`
+**Status**: `Phases 0-1 done -- sign in, role-gated shell, no Supabase client. Phase 2 next`
 **Created**: 2026-08-17
 **Revised**: 2026-08-20 -- the shell now comes from a template rather than `bun create next-app`
 **Complexity**: Large (~3 weeks to a usable console)
@@ -204,13 +204,13 @@ repo and becomes a workspace member with no leftovers.
 
 ## Phase 1 — Auth, shell, role guard · Medium
 
-- [ ] `proxy.ts` (Next 16's middleware): refresh session, redirect to `/login`
-- [ ] ~~`src/lib/supabase/server.ts` — cookie-bound `createServerClient`~~ — **superseded by api-plan B16.** The admin has no Supabase client at all now: it posts credentials to `POST /auth/sign-in` and stores the returned session in an **httpOnly** cookie it sets itself (`sb-admin`), refreshing through `POST /auth/refresh`. No `NEXT_PUBLIC_SUPABASE_*` in this app
-- [ ] `src/lib/api.ts` — `hc` client from api-plan B12, with the session JWT attached as `Authorization: Bearer`
-- [ ] `src/lib/auth.ts` — `getStaff()` (per-request cached, from the API's `/me`), `requireRole([...])` for nav and page gating
-- [ ] Shell: sidebar + header; nav as typed data in `src/navigation/sidebar/sidebar-items.ts`, filtered by role
-- [ ] `/unauthorized` for non-staff and `is_active = false` — **a customer's login is valid auth with no `staff_users` row; this is the check that stops them**
-- [ ] **Validate**: log in as each role; grep `.next/static` for the service key (must be absent); log into store and admin in one browser and confirm neither session evicts the other
+- [x] `proxy.ts` (Next 16's middleware): refresh session, redirect to `/login`
+- [x] ~~`src/lib/supabase/server.ts` — cookie-bound `createServerClient`~~ — **superseded by api-plan B16.** The admin has no Supabase client at all now: it posts credentials to `POST /auth/sign-in` and stores the returned session in an **httpOnly** cookie it sets itself (`sb-admin`), refreshing through `POST /auth/refresh`. No `NEXT_PUBLIC_SUPABASE_*` in this app
+- [x] `src/lib/api.ts` — `hc` client from api-plan B12, with the session JWT attached as `Authorization: Bearer`
+- [x] `src/lib/auth.ts` — `getStaff()` (per-request cached, from the API's `/me`), `requireRole([...])` for nav and page gating
+- [x] Shell: sidebar + header; nav as typed data in `src/navigation/sidebar/sidebar-items.ts`, filtered by role
+- [x] `/unauthorized` for non-staff and `is_active = false` — **a customer's login is valid auth with no `staff_users` row; this is the check that stops them**
+- [x] **Validate**: log in as each role; grep `.next/static` for the service key (must be absent); log into store and admin in one browser and confirm neither session evicts the other
 
 **Role map** (`STAFF_ROLES`, `enums.ts:140`):
 
@@ -368,7 +368,7 @@ a store you can operate.
 | Phase | Status | Notes |
 |---|---|---|
 | 0 Workspace scaffold | **done** | template vendored to `apps/admin`; zod v3, `@ecom/schema` wired, Dockerfile + compose, hot reload verified |
-| 1 Auth & shell | not started | |
+| 1 Auth & shell | **done** | httpOnly `sb-admin` cookie, `proxy.ts`, `/me`-backed `getStaff()`, role-filtered nav |
 | 2 Data layer | not started | |
 | 3 ~~RPC migration~~ | moved | now api-plan **B3** |
 | 4 Orders | not started | |

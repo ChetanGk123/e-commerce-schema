@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState, useTransition } from "react";
 
 import Link from "next/link";
 
@@ -9,6 +9,7 @@ import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 
+import { signIn } from "@/app/(auth)/_actions/sign-in";
 import { FormCheckbox } from "@/components/form/form-checkbox";
 import { FormInput } from "@/components/form/form-input";
 import { Button } from "@/components/ui/button";
@@ -20,21 +21,6 @@ const formSchema = z.object({
   password: z.string().min(6, { message: "Password must be at least 6 characters." }),
   remember: z.boolean().optional(),
 });
-
-function onSubmit(data: z.infer<typeof formSchema>) {
-  // Remembers the address only, so the field is pre-filled on this browser next
-  // time. How long the session itself lasts is the auth provider's cookie to set
-  // — that cannot be done from here.
-  if (data.remember) {
-    localStorage.setItem(REMEMBERED_EMAIL_KEY, data.email);
-  } else {
-    localStorage.removeItem(REMEMBERED_EMAIL_KEY);
-  }
-
-  // TODO: replace with a call to your auth provider.
-  // Never log or render submitted credentials.
-  toast.info("Not wired up yet — connect your auth provider in onSubmit.");
-}
 
 function ForgotPasswordLink() {
   return (
@@ -49,6 +35,9 @@ function ForgotPasswordLink() {
 }
 
 export function LoginForm() {
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -59,6 +48,27 @@ export function LoginForm() {
   });
 
   const { reset } = form;
+
+  // The password goes to a Server Action, never to a fetch this component
+  // composes: it is posted to the server process and the session comes back as
+  // an httpOnly cookie set in the same round trip, so script on this page never
+  // holds a token it could leak.
+  function onSubmit(data: z.infer<typeof formSchema>) {
+    // The address only, so the field is pre-filled next time. Never the password.
+    if (data.remember) {
+      localStorage.setItem(REMEMBERED_EMAIL_KEY, data.email);
+    } else {
+      localStorage.removeItem(REMEMBERED_EMAIL_KEY);
+    }
+
+    setError(null);
+    startTransition(async () => {
+      // Resolves only on failure -- success redirects, which throws to unwind.
+      const result = await signIn(data.email, data.password);
+      setError(result.error);
+      toast.error(result.error);
+    });
+  }
 
   // Read after mount, not during render: localStorage does not exist on the
   // server, and seeding defaultValues from it would mismatch on hydration.
@@ -98,8 +108,13 @@ export function LoginForm() {
           description="Fills in your email next time on this browser."
         />
       </FieldGroup>
-      <Button className="w-full" type="submit">
-        Login
+      {error ? (
+        <p role="alert" className="text-destructive text-sm">
+          {error}
+        </p>
+      ) : null}
+      <Button className="w-full" type="submit" disabled={pending}>
+        {pending ? "Signing in…" : "Login"}
       </Button>
     </form>
   );
