@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { ArrowRight, Command, Gauge, Palette, ShieldCheck } from "lucide-react";
 
+import { ROUTES } from "@/constants";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { APP_CONFIG } from "@/config/app-config";
@@ -39,10 +40,10 @@ export default function Home() {
           </Link>
           <nav className="flex items-center gap-2">
             <Button asChild variant="ghost">
-              <Link href="/login">Sign in</Link>
+              <Link href={ROUTES.LOGIN}>Sign in</Link>
             </Button>
             <Button asChild>
-              <Link href="/register">Get started</Link>
+              <Link href={ROUTES.REGISTER}>Get started</Link>
             </Button>
           </nav>
         </div>
@@ -59,13 +60,13 @@ export default function Home() {
           </p>
           <div className="mt-10 flex flex-wrap items-center justify-center gap-3">
             <Button asChild size="lg">
-              <Link href="/register">
+              <Link href={ROUTES.REGISTER}>
                 Get started
                 <ArrowRight data-icon="inline-end" />
               </Link>
             </Button>
             <Button asChild size="lg" variant="outline">
-              <Link href="/dashboard">View the dashboard</Link>
+              <Link href={ROUTES.DASHBOARD}>View the dashboard</Link>
             </Button>
           </div>
         </section>
@@ -90,7 +91,7 @@ export default function Home() {
           <span>
             © {new Date().getFullYear()} {APP_CONFIG.name}
           </span>
-          <Link href="/dashboard" className="hover:text-foreground">
+          <Link href={ROUTES.DASHBOARD} className="hover:text-foreground">
             Dashboard
           </Link>
         </div>

@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { ROUTES } from "@/constants";
 import type { Customer } from "@/lib/api";
 import type { ApiError } from "@/lib/api-error";
 import { formatDate } from "@/lib/format";
@@ -101,7 +102,7 @@ export function CustomersTable({
         <Button asChild variant="outline" size="sm" disabled={params.offset === 0}>
           <Link
             href={pageHref(
-              "/dashboard/customers",
+              ROUTES.CUSTOMERS,
               params,
               Math.max(0, params.offset - params.limit),
             )}
@@ -110,7 +111,7 @@ export function CustomersTable({
           </Link>
         </Button>
         <Button asChild variant="outline" size="sm" disabled={!hasNext}>
-          <Link href={pageHref("/dashboard/customers", params, params.offset + params.limit)}>
+          <Link href={pageHref(ROUTES.CUSTOMERS, params, params.offset + params.limit)}>
             Next
           </Link>
         </Button>

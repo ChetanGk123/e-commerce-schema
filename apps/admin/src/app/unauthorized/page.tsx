@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Lock } from "lucide-react";
 import type { Metadata } from "next";
 
+import { ROUTES } from "@/constants";
 import { Button } from "@/components/ui/button";
 
 export const metadata: Metadata = {
@@ -21,7 +22,7 @@ export default function UnauthorizedPage() {
         </p>
         <div className="mt-6">
           <Button asChild>
-            <Link prefetch={false} href="/dashboard">
+            <Link prefetch={false} href={ROUTES.DASHBOARD}>
               Go to Homepage
             </Link>
           </Button>

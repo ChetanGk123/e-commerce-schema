@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import type { Metadata } from "next";
 
+import { ROUTES } from "@/constants";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 import { ForgotPasswordForm } from "../_components/forgot-password-form";
@@ -27,7 +28,7 @@ export default function ForgotPasswordPage() {
 
       <p className="text-center text-muted-foreground text-sm">
         Remembered it?{" "}
-        <Link prefetch={false} href="/login" className="text-foreground underline underline-offset-4">
+        <Link prefetch={false} href={ROUTES.LOGIN} className="text-foreground underline underline-offset-4">
           Sign in
         </Link>
       </p>

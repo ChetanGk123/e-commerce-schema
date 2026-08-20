@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 
+import { ROUTES } from "@/constants";
 import { anonApi } from "@/lib/api";
 import { writeSession } from "@/lib/session";
 
@@ -45,5 +46,5 @@ export async function signIn(email: string, password: string): Promise<SignInRes
   // requireStaff, so a customer who signs in correctly lands on
   // /unauthorized -- which is the honest answer -- rather than being told
   // their password was wrong.
-  redirect("/dashboard");
+  redirect(ROUTES.DASHBOARD);
 }

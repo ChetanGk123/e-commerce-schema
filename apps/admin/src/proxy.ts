@@ -1,3 +1,4 @@
+import { ROUTES } from "@/constants";
 import { type NextRequest, NextResponse } from "next/server";
 
 /**
@@ -20,7 +21,7 @@ export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
 
   if (!hasSession) {
-    const login = new URL("/login", request.url);
+    const login = new URL(ROUTES.LOGIN, request.url);
     // Where they were going, so sign-in can put them back. Path and query
     // only -- never the whole URL, which would let a crafted ?next= bounce
     // someone to another origin after a successful sign-in.

@@ -9,6 +9,7 @@ import { CirclePlus, Command, Mail } from "lucide-react";
 
 import type { StaffRole } from "@ecom/schema/enums";
 
+import { ROUTES } from "@/constants";
 import { Button } from "@/components/ui/button";
 import {
   Sidebar,
@@ -78,7 +79,7 @@ export function AppSidebar({ role, ...props }: AppSidebarProps) {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton asChild>
-              <Link prefetch={false} href="/dashboard" onClick={closeMobileSidebar}>
+              <Link prefetch={false} href={ROUTES.DASHBOARD} onClick={closeMobileSidebar}>
                 <Command />
                 <span className="font-semibold text-base">{APP_CONFIG.name}</span>
               </Link>

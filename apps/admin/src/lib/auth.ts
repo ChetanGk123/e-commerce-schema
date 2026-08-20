@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 
 import type { StaffRole } from "@ecom/schema/enums";
 
+import { ROUTES } from "@/constants";
 import { api } from "@/lib/api";
 
 export interface Staff {
@@ -44,7 +45,7 @@ export const getStaff = cache(async (): Promise<Staff | null> => {
  */
 export async function requireStaff(): Promise<Staff> {
   const staff = await getStaff();
-  if (!staff) redirect("/unauthorized");
+  if (!staff) redirect(ROUTES.UNAUTHORIZED);
   return staff;
 }
 
@@ -61,7 +62,7 @@ export async function requireStaff(): Promise<Staff> {
  */
 export async function requireRole(roles: readonly StaffRole[]): Promise<Staff> {
   const staff = await requireStaff();
-  if (!roles.includes(staff.role)) redirect("/unauthorized");
+  if (!roles.includes(staff.role)) redirect(ROUTES.UNAUTHORIZED);
   return staff;
 }
 

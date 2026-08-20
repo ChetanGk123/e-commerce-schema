@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 
+import { ROUTES } from "@/constants";
 import { api } from "@/lib/api";
 import { clearSession, readSession } from "@/lib/session";
 
@@ -35,5 +36,5 @@ export async function signOut(): Promise<void> {
   }
 
   await clearSession();
-  redirect("/login");
+  redirect(ROUTES.LOGIN);
 }

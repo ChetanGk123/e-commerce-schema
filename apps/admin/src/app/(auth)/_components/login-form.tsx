@@ -9,6 +9,7 @@ import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 
+import { ROUTES } from "@/constants";
 import { signIn } from "@/app/(auth)/_actions/sign-in";
 import { FormCheckbox } from "@/components/form/form-checkbox";
 import { FormInput } from "@/components/form/form-input";
@@ -26,7 +27,7 @@ function ForgotPasswordLink() {
   return (
     <Link
       prefetch={false}
-      href="/forgot-password"
+      href={ROUTES.FORGOT_PASSWORD}
       className="text-muted-foreground text-xs underline underline-offset-4 hover:text-foreground"
     >
       Forgot password?

@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import type { Metadata } from "next";
 
+import { ROUTES } from "@/constants";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 import { LoginForm } from "../_components/login-form";
@@ -29,7 +30,7 @@ export default function LoginPage() {
 
       <p className="text-center text-muted-foreground text-sm">
         Don&apos;t have an account?{" "}
-        <Link prefetch={false} href="/register" className="text-foreground underline underline-offset-4">
+        <Link prefetch={false} href={ROUTES.REGISTER} className="text-foreground underline underline-offset-4">
           Create one
         </Link>
       </p>
