@@ -2440,6 +2440,47 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("0");
   });
 
+  test("registering a job does not claim it", async () => {
+    // T8. A freshly deployed store must not immediately run an
+    // unattended, irreversible collection pass against a bucket it has
+    // only just started filling.
+    await sql("delete from job_runs where job = 'test_job'");
+    expect(await sqlValue("select claim_job_run('test_job', '7 days')")).toBe("f");
+    // ...but the clock is now running.
+    expect(await sqlValue("select count(*) from job_runs where job = 'test_job'")).toBe("1");
+  });
+
+  test("a job that is not due answers false, however often it is asked", async () => {
+    // The tick asks every sixty seconds. If "not due" were expensive or
+    // wrong, that is 1440 wrong answers a day.
+    for (let i = 0; i < 3; i++) {
+      expect(await sqlValue("select claim_job_run('test_job', '7 days')")).toBe("f");
+    }
+  });
+
+  test("a due job is claimed once, and is not due again after", async () => {
+    // What this proves: the claim consumes the window, so the second and
+    // third callers get nothing.
+    //
+    // What it does NOT prove: atomicity under real contention. Three
+    // `docker exec psql` calls are not reliably simultaneous, and a
+    // read-then-write implementation would pass this too. The guarantee
+    // that N containers ticking in the same second cannot all win comes
+    // from claim_job_run being a single statement -- structural, not
+    // reproducible here.
+    await sql(`
+      update job_runs set last_run_at = now() - interval '30 days' where job = 'test_job';
+    `);
+    const results = await Promise.all([
+      sqlValue("select claim_job_run('test_job', '7 days')"),
+      sqlValue("select claim_job_run('test_job', '7 days')"),
+      sqlValue("select claim_job_run('test_job', '7 days')"),
+    ]);
+    expect(results.filter((r) => r === "t")).toHaveLength(1);
+
+    await sql("delete from job_runs where job = 'test_job'");
+  });
+
   test("the report reads without recording anything", async () => {
     // A GET that recorded sightings would let anyone refreshing an admin
     // page advance objects towards deletion.

@@ -292,7 +292,18 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
     confirmation window it is deleted on pass two. A path that gains a row in between is
     never deleted and its sighting is gone
 
-- [ ] **T8. Schedule it, unattended** — the jobs tick or `supabase/jobs/retention.sql`
+- [x] **T8. Schedule it, unattended** — **done**,
+  `supabase/migrations/20260801003300_job_runs.sql` + the jobs tick
+  - **A claim, not a timestamp somebody reads and then acts on.** N containers each
+    ticking every sixty seconds would otherwise all start the weekly pass in the same
+    second, each listing the entire bucket and racing the rest to remove the same objects.
+    Reading "is it due" and writing "I am doing it" as two statements is the same bug at a
+    different scale
+  - **Registering a job does not claim it** (`xmax = 0`), so a freshly deployed store does
+    not immediately run an irreversible pass against a bucket it has only started filling
+  - Rides along on `POST /jobs/drain` too, for the same reason the webhook redrive does: a
+    deployment with `JOBS_INTERVAL_SECONDS=0` has one cron entry, and a second endpoint it
+    does not know to call is a fix that never arrives
   - Weekly, `apply: true` (decision 1)
   - Every pass that deletes anything raises an ops alert saying how many and links the log.
     Unattended does not mean unannounced — with no backup, the notification is the only

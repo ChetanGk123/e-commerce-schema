@@ -536,6 +536,42 @@ export async function reconcileStorage(
 }
 
 /**
+ * How often the reconciler runs (T8).
+ *
+ * Paired with GC_CONFIRM_DAYS on purpose: at seven and seven, an object
+ * first seen unreferenced on one pass is collectable by the next. Set
+ * the confirmation window longer and it simply takes more passes, which
+ * is the safe direction to be wrong in.
+ */
+const RECONCILE_EVERY = "7 days";
+
+/**
+ * Runs a pass if one is due, and removes what it finds (decision 1,
+ * 2026-08-20: unattended).
+ *
+ * The claim is atomic because the alternative is every container
+ * starting the weekly pass in the same second, each listing the whole
+ * bucket and racing the rest to delete the same objects.
+ */
+export async function maybeReconcile(): Promise<{ ran: boolean; collected: number }> {
+  if (!storageConfigured()) return { ran: false, collected: 0 };
+
+  const db = serviceClient();
+  const claim = await db.rpc("claim_job_run", {
+    p_job: "storage_reconcile",
+    p_every: RECONCILE_EVERY,
+  });
+  if (claim.error) {
+    log.error({ err: claim.error.message }, "jobs.reconcile_claim_failed");
+    return { ran: false, collected: 0 };
+  }
+  if (claim.data !== true) return { ran: false, collected: 0 };
+
+  const result = await reconcileStorage(true);
+  return { ran: true, collected: result.collected };
+}
+
+/**
  * The two silent failures, said out loud.
  *
  * /admin/outbox and /admin/webhooks compute exactly what is wrong and
@@ -767,9 +803,12 @@ export async function startJobs(): Promise<void> {
       await drainOutbox();
       await redriveWebhooks();
       if (!cronOwns) await runSweepers();
-      // Always, cron or not: this one makes HTTP calls to storage, which
+      // Always, cron or not: these make HTTP calls to storage, which
       // pg_cron cannot do however the retention jobs are scheduled.
       await sweepStorage();
+      // Claims its own cadence, so calling it every tick is correct and
+      // cheap -- it answers "not due" in one round trip.
+      await maybeReconcile();
       // Last, so it reports on the state the pass above just left.
       await checkOps();
     } catch (err) {

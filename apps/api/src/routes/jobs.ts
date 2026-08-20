@@ -6,6 +6,7 @@ import { throwOnDbError } from "../errors";
 import {
   REDRIVE_MAX_ATTEMPTS,
   drainOutbox,
+  maybeReconcile,
   reconcileStorage,
   redriveWebhooks,
   surveyStorage,
@@ -47,6 +48,14 @@ const DrainResult = z
         raced: z.number().int(),
       })
       .openapi("RedriveResult"),
+    /**
+     * Whether the weekly image collection was due this call. `ran:
+     * false` is the normal answer -- it claims its own cadence, so a
+     * cron entry hitting this every minute triggers one pass a week.
+     */
+    reconcile: z
+      .object({ ran: z.boolean(), collected: z.number().int() })
+      .openapi("ReconcileResult"),
   })
   .openapi("DrainResult");
 
@@ -257,7 +266,12 @@ export const jobsRoute = new OpenAPIHono({ defaultHook: validationHook })
     // would be a strange way to fix a webhook that never got applied.
     const mail = await drainOutbox(limit);
     const webhooks = await redriveWebhooks();
-    return c.json({ ...mail, webhooks }, 200);
+    // Rides along for the same reason the redrive does: a deployment
+    // with JOBS_INTERVAL_SECONDS=0 has one cron entry pointed here, and
+    // it claims its own weekly cadence, so calling it on every drain
+    // costs one round trip and answers "not due".
+    const reconcile = await maybeReconcile();
+    return c.json({ ...mail, webhooks, reconcile }, 200);
   })
 
   .openapi(health, async (c) => {
