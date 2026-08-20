@@ -123,8 +123,13 @@ inside the transaction that triggered it.
 
 **Layer 3 — a reconciler.** Lists the bucket, subtracts every path the database still
 references, deletes the remainder. The only thing that can find case 4 — and the only thing
-that can delete every image in the store if it is wrong. It runs **dry by default** and
-carries the rails below.
+that can delete every image in the store if it is wrong.
+
+It runs **unattended** (decision 1) against a bucket with **no backup** (decision 3), so
+its correctness is the last line of defence rather than the first. Two passes: a path seen
+as an orphan is *recorded*, and only deleted when a later pass, at least
+`GC_CONFIRM_DAYS` (default 7) afterwards, still finds it orphaned. Everything else below
+is a rail on top of that.
 
 ### One source of truth for "still referenced"
 
@@ -135,29 +140,43 @@ so the reconciler asks one question and adding a new image column is one line in
 |---|---|---|
 | `product_images.url` | populated | the main one |
 | `collections.image_url` | settable | a plain URL — may point outside our bucket |
-| `invoices.pdf_url` | **read but never written** | generated PDFs will live in a bucket too; the schema is ahead of its callers again |
 
-`shipments.tracking_url` is a courier's URL and is deliberately excluded.
+Two columns, not three. `invoices.pdf_url` is **excluded by decision 2**: invoices are
+rendered as HTML and printed by the browser, so no PDF is ever stored and the column has no
+writer. `shipments.tracking_url` is a courier's URL, excluded for the obvious reason.
+
+Anything added to this list later must be added *before* it holds data, not after. A column
+holding object paths that `referenced_objects()` does not know about is a column whose
+images the reconciler will delete.
 
 ---
 
 ## Safety rails on the reconciler
 
-This is where you delete a customer-facing catalog by accident. All five are mandatory, and
-T9 is the task that proves each one fires.
+This is where you delete a customer-facing catalog by accident, unattended, with nothing to
+restore from. All six are mandatory, and T9 is the task that proves each one fires.
 
-1. **Age threshold.** Never consider an object younger than `GC_MIN_AGE_HOURS` (default 24).
+1. **Two sightings, `GC_CONFIRM_DAYS` apart.** A path is deleted only if an earlier pass
+   also saw it orphaned and a row still says so. **This is the rail that replaces the human
+   decision 1 removed**, and it is the one that survives the failure the others cannot: a
+   `referenced_objects()` that breaks — a migration mid-flight, a renamed column, a revoked
+   grant — produces a first sighting and nothing more. The next pass, with the query
+   working again, clears the sighting and deletes nothing.
+2. **Age threshold.** Never consider an object younger than `GC_MIN_AGE_HOURS` (default 24).
    An object uploaded two seconds ago may not have a committed row yet, and the reconciler
    must not race the request that created it.
-2. **Dry run by default.** `apply: true` is opt-in. The scheduled job reports; a human
-   applies, at least until it has been boring for a month.
 3. **Absolute cap.** Refuse the pass **entirely** if the delete set exceeds `GC_MAX_DELETE`
    (default 100) — do not delete the first hundred. A large set means the reference query
-   broke, not that you have a lot of garbage.
+   broke, not that you have a lot of garbage. Refusing raises an ops alert; proceeding
+   quietly is how the whole catalog goes.
 4. **Refuse on an empty reference set.** If `referenced_objects()` returns zero rows, that is
    a broken query, not an empty catalog. Abort.
 5. **Log every path before deleting it**, at info level, so the list survives the incident
-   even when the objects do not.
+   even when the objects do not. With no bucket backup this log is the only record that a
+   given object ever existed.
+6. **Dry run stays available**, just no longer the default: `POST /admin/storage/gc` with
+   `{ apply: false }` is how you inspect a pass before trusting a change to any of the
+   above.
 
 ---
 
@@ -216,20 +235,38 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
   - **Must page** — the default limit is 100 and a real catalog is not
   - *Acceptance*: a bucket with 250 objects returns 250
 
-- [ ] **T7. The reconciler** — `apps/api/src/routes/jobs.ts`
-  - `GET /admin/storage/orphans` — the report. Always safe, staff only
-  - `POST /admin/storage/gc` with `{ apply: true }` — deletes, subject to every rail above
+- [ ] **T7. The reconciler, two-pass** — migration + `apps/api/src/routes/jobs.ts`
+  - `storage_orphan_sightings`: `path text pk`, `first_seen_at timestamptz`,
+    `last_seen_at timestamptz`. A pass upserts every orphan it finds and **deletes the
+    sighting for any path that is no longer orphaned** — a path that came back must start
+    its week again
+  - Delete only where `first_seen_at < now() - GC_CONFIRM_DAYS` and the path is orphaned in
+    *this* pass too
+  - `GET /admin/storage/orphans` — the report, staff only, never deletes
+  - `POST /admin/storage/gc` — `{ apply: true }` deletes subject to every rail;
+    `{ apply: false }` is the dry run
   - Reports **both** directions: objects with no row, and rows whose object is missing
-  - *Acceptance*: an object planted directly in the bucket appears in the report and is
-    deleted only with `apply: true`
+  - *Acceptance*: a planted object is reported on pass one and **still present**; after the
+    confirmation window it is deleted on pass two. A path that gains a row in between is
+    never deleted and its sighting is gone
 
-- [ ] **T8. Schedule it** — `supabase/jobs/retention.sql` or the jobs tick
-  - Weekly, dry run, result to an ops alert when the orphan count exceeds a threshold
-  - *Acceptance*: nothing is deleted without a human until decision 1 below is taken
+- [ ] **T8. Schedule it, unattended** — the jobs tick or `supabase/jobs/retention.sql`
+  - Weekly, `apply: true` (decision 1)
+  - Every pass that deletes anything raises an ops alert saying how many and links the log.
+    Unattended does not mean unannounced — with no backup, the notification is the only
+    thing that tells anyone it happened
+  - A refused pass (rail 3 or 4) alerts at **error** level and deletes nothing
+  - *Acceptance*: a scheduled pass deletes a confirmed orphan with no human involved, and
+    says so
 
 - [ ] **T9. Prove every rail fires** — `apps/api/test/integration/seam.test.ts`
-  - One test per rail: a young object is skipped; an over-cap set refuses **entirely** rather
-    than partially; an empty reference set aborts; a dry run deletes nothing
+  - One test per rail: an unconfirmed orphan survives its first pass; a young object is
+    skipped; an over-cap set refuses **entirely** rather than partially; an empty reference
+    set aborts; a dry run deletes nothing
+  - **The one that matters most**: simulate `referenced_objects()` returning a partial set
+    (a table temporarily unreadable), confirm nothing is deleted, then restore it and
+    confirm the sightings clear. That is the exact shape of the accident decisions 1 and 3
+    make unrecoverable
   - The over-cap and empty-set cases are the ones that would delete the catalog. **A rail
     with no test is a rail somebody deletes later as dead code**
 
@@ -238,13 +275,17 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
 - [ ] **T10. Collection images** — `POST /admin/collections/{id}/image`, same upload path.
   `collections.image_url` is currently free text somebody can point anywhere, which works
   and is invisible to the GC
-- [ ] **T11. Invoice PDFs.** When `invoices.pdf_url` gains a writer it uses the same bucket,
-  the same GC, and a **private** prefix. An invoice is a customer's tax document and must
-  not sit behind a public CDN domain — that needs a second bucket or a signed-URL read
-  path. A decision, not a task
-- [ ] **T12. Bucket backup.** `scripts/backup.sh` covers Postgres and says plainly that it
-  does not cover the bucket. Decide: R2 bucket-to-bucket replication, or accept Cloudflare's
-  durability and that a delete is permanent
+- [ ] **T11. Retire `invoices.pdf_url`** — decision 2 settled this by removing the feature:
+  invoices are rendered as HTML and printed by the browser, so no PDF is ever stored. That
+  leaves a column nothing writes and `routes/invoicing.ts` still reads and publishes as
+  `pdfUrl`, which tells every client there is a file to fetch. Either drop the column in a
+  migration and the field from the response, or comment it as permanently null. **The good
+  news is the whole of T11's original problem — a tax document behind a public CDN domain —
+  no longer exists**, and no second bucket is needed
+- [x] **T12. Bucket backup — decided: none.** A delete is permanent (decision 3).
+  `scripts/backup.sh` already says it does not cover the bucket; that stays true and stays
+  documented. The consequence is not free, and it is paid for in rail 1: the confirmation
+  window is what an unbacked bucket buys instead of a restore
 
 ### Phase 4 — worth doing, not worth doing first
 
@@ -278,19 +319,34 @@ object is never collected, which is the thing being fixed.
 
 ---
 
-## Decisions needed from you
+## Decisions taken — 2026-08-20
 
-1. **Does the reconciler ever delete unattended?** Recommendation: no for the first month.
-   Report weekly, apply by hand, enable once the report has been boring.
-2. **Invoice PDFs (T11)** — a second private bucket, or signed URLs from the public one?
-   Blocks nothing today, because nothing writes `pdf_url` yet.
-3. **Bucket backup (T12)** — replicate, or accept that a delete is permanent?
+1. **The reconciler deletes unattended.** No human in the loop.
+2. **Invoice PDFs are generated on the fly**, HTML the browser prints. Nothing is stored, so
+   `invoices.pdf_url` drops out of this design entirely — see T11.
+3. **No bucket backup.** A delete is permanent.
+
+**1 and 3 together are the thing to design around, and they are why T7 grew a second
+pass.** Unattended deletion is fine on its own; unattended deletion with no way back is one
+bad `referenced_objects()` away from a catalog with no photographs and no restore. The
+rails stop being belt-and-braces at that point and become the only thing between a bad
+deploy and permanent loss. Hence: **an orphan must be seen twice, a week apart, before it
+is deleted.** A query that breaks — a migration mid-flight, a renamed column, a permission
+change — produces a first sighting and nothing else, and the next pass clears it.
+
+That costs one table and one `where` clause. It buys back the week that decision 3 gave
+away.
 
 ---
 
 ## What "done" looks like
 
 Delete a product in psql. Within one jobs tick its images are gone from R2, the queue is
-empty, and `ecom_storage_gc_queued` is zero. Run the reconciler: no orphans, no broken
-references. Nothing in the bucket is unaccounted for, and nothing on a product page is a
-missing image.
+empty, and `ecom_storage_gc_queued` is zero.
+
+Plant an object in the bucket by hand. The next weekly pass reports it and leaves it
+alone. The pass after — a week later — deletes it, unattended, and a notification says it
+did. Break `referenced_objects()` in between and nothing is deleted at all.
+
+Nothing in the bucket is unaccounted for, nothing on a product page is a missing image, and
+the only way to lose a photograph is for it to be genuinely unreferenced for a week.
