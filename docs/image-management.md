@@ -372,11 +372,32 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
   resident. A presigned PUT removes that entirely, at the cost of SigV4 signing here and R2
   credentials living in this process. It also creates case-4 orphans by design, which is why
   T5–T7 come first
-- [ ] **T14. Resize and re-encode on upload.** `imgproxy` is already in the stack. Serving a
-  6000px 5MB JPEG to a phone is the most expensive thing this store does per page view, and
-  R2's free egress does not make the customer's data plan free
-- [ ] **T15. Alt text as a requirement, not a field.** Optional today. A storefront with no
-  alt text is inaccessible and invisible to image search
+- [x] **T14. Resizing — done at Cloudflare's edge, not on upload** (`setup.md` C5b,
+  `IMAGE_RESIZE_CDN`, `srcSet()`).
+  - **The plan assumed imgproxy and that was wrong.** Putting imgproxy in the read path
+    reverses the whole R2 arrangement — every image would flow back through the container,
+    which is exactly the bandwidth and CPU the custom domain exists to avoid. Cloudflare
+    derives from the stored original on request: one file in the bucket, and reads still
+    never touch this service
+  - **Not resizing on upload either**, which would mean storing derivatives, choosing sizes
+    before the design exists, and losing the original a later redesign might want
+  - **Off by default.** A srcset whose entries 404 — a zone without Image Resizing enabled,
+    or `STORAGE_PUBLIC_URL` pointing at the unproxied `r2.dev` — is a **broken page rather
+    than a slow one**. `srcSet()` returns null rather than a single candidate for the same
+    reason: a browser given one candidate uses it at every viewport, i.e. the heavy
+    original on a phone
+- [x] **T15. Alt text as a requirement, not a field** — **done**.
+  - **Required to be present, allowed to be empty**, and the distinction is the whole
+    point. `alt=""` is the *correct* markup for a decorative image, and a rule demanding
+    non-empty text does not produce accessibility — it produces `image1.jpg`, read aloud by
+    a screen reader. What is required is that somebody decided, not that somebody typed.
+  - Empty is stored as empty rather than collapsed to null, because the difference *is* the
+    decision. `PATCH` can set it to `""` but no longer back to null: an image cannot return
+    to "nobody decided"
+  - **The check had to move before the upload.** First version put it after, which is the
+    orphan-creating pattern T3 existed to remove: a 400 raised once the bytes are stored
+    leaves an object no row will ever point at. The test asserts the refusal *and* that
+    nothing was stored
 
 ---
 

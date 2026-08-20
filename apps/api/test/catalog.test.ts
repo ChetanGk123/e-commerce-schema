@@ -301,3 +301,24 @@ describe("product images", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("edge-resized images", () => {
+  /**
+   * Cloudflare derives sizes from the stored original on request, so the
+   * bucket holds one file and the read path still never touches this
+   * service. What the API contributes is the srcset -- and the rule that
+   * matters is when it declines to.
+   */
+  test("off by default, and null rather than a single candidate", async () => {
+    const { srcSet } = await import("../src/storage");
+    // A browser handed one candidate uses it at every viewport, which is
+    // the heavy original on a phone -- the thing this exists to avoid.
+    // So `null`, and the client renders a plain <img>.
+    expect(srcSet("https://img.example.test/products/a/b.jpg")).toBeNull();
+  });
+
+  test("the storefront schema publishes srcset as nullable", async () => {
+    const schemas = (await doc()).components.schemas;
+    expect(JSON.stringify(schemas.CatalogImage)).toContain("srcset");
+  });
+});

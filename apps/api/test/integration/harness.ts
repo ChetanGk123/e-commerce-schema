@@ -198,6 +198,10 @@ export async function configureEnv(kongUrl: string): Promise<void> {
   // resolves them exactly as it would resolve a real upload.
   process.env.STORAGE_BUCKET = "test-images";
   process.env.STORAGE_PUBLIC_URL = STORAGE_PUBLIC_URL;
+  // On here, off by default in production. The srcset path is only
+  // exercisable with the flag set at import time, and this is the one
+  // suite that controls env before importing the app.
+  process.env.IMAGE_RESIZE_CDN = "true";
 }
 
 /** One value back out of the database, for asserting what a trigger did. */
