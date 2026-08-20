@@ -5,8 +5,9 @@ storefront. Tick boxes as work lands, update **Status** and the Progress table a
 bottom. Anything discovered mid-build that contradicts this file: fix the file, don't work
 around it.
 
-**Status**: `not-started`
+**Status**: `Phase 0 done -- apps/admin builds, runs and reaches the API. Phase 1 next`
 **Created**: 2026-08-17
+**Revised**: 2026-08-20 -- the shell now comes from a template rather than `bun create next-app`
 **Complexity**: Large (~3 weeks to a usable console)
 **Depends on**: `docs/api-plan.md` — **build that first.** B0–B4 there unblock this file's read-only screens
 
@@ -24,13 +25,17 @@ see `docs/api-plan.md`) plus the admin and storefront front ends. Every request 
 signed-in user's JWT through to Postgres, so `audit_logs` keeps real attribution.
 
 Neither app talks to Postgres. **`apps/api` owns all database access**; both apps call it
-over HTTP with the caller's Supabase session JWT as a bearer token. The browser keeps
-supabase-js only to obtain that session (and, per api-plan B13, optionally to subscribe to
-Realtime notifications).
+over HTTP with the caller's Supabase session JWT as a bearer token.
+
+**Nor does either app hold a Supabase client** — superseded by api-plan B16, and Phase 1
+below says so at the line it replaced. Credentials go to `POST /auth/sign-in` and the
+session comes back to be stored in an httpOnly cookie the app sets itself. There is no
+`NEXT_PUBLIC_SUPABASE_*` in the admin at all, which is also what makes the "grep the bundle
+for a key" check in Phase 1 a check rather than a hope.
 
 | | Storefront | Admin |
 |---|---|---|
-| Browser holds | session JWT; anon key for auth/Realtime only | same |
+| Browser holds | session JWT in an httpOnly cookie | same |
 | Data path | `apps/api` | `apps/api` |
 | Service key | **neither app holds it** — only the API does | — |
 | Variant reads (server-side, in the API) | `storefront_variants`, hides `cost_price` | `product_variants` base table |
@@ -98,6 +103,8 @@ ships raw TypeScript, and without this the build fails on the first import.
 | Hosting | **Dokploy**, self-hosted Supabase from `ChetanGk123/dokploy-templates` | End-state target. Backups become your responsibility — see api-plan risks |
 | Monorepo tooling | Bun workspaces + **Turborepo** | One `turbo.json`, no layout change. Buys `turbo dev` for both apps, CI remote caching across two Next builds, and task ordering so `@ecom/schema` typechecks first. Not Nx — its generators/plugins are scaffolding this repo won't use |
 | Next.js runtime | **Node, not Bun** | `bun run dev` respects the `next` binary's `#!/usr/bin/env node` shebang, so Next runs on Node by default. Do not add `--bun` — Bun is the installer and script runner here, not the server runtime |
+| Admin shell | **`ChetanGk123/next-shadcn-admin-dashboard`**, branch `template` | Next 16, React 19, Tailwind 4, shadcn, TanStack Query + Table, react-hook-form, recharts, biome -- the stack this file already specified, already assembled. Vendored, not submoduled: it is a starting point, not a dependency, and it stops being that repo the moment the first screen is written |
+| Zod version | **v3 across the workspace**, template downgraded to match | The template ships v4. `@ecom/schema` is v3 and `@asteasolutions/zod-to-openapi@7` inside `@hono/zod-openapi` requires v3, so going the other way means migrating the API's whole contract layer. Only 5 template files import zod and the v4-only syntax is `z.email()`/`z.url()` -- the cheap direction is obvious |
 | Shared package | `packages/schema` | Every library lives under `packages/`; `make types` writes there |
 | Shared UI package | **None** | Dense admin tables and a marketing storefront have opposite constraints. Create `packages/ui` only when a second app imports the same component |
 | Auth for data (admin) | Session via `@supabase/ssr`; **data via `apps/api`** with that JWT as a bearer token | The API forwards it to Postgres, so `auth.uid()` — and the audit trail — survives |
@@ -114,14 +121,16 @@ ships raw TypeScript, and without this the build fails on the first import.
 
 | Asset | Use | Shared? |
 |---|---|---|
-| `supabase/migrations/20260801000000_baseline.sql` | 51 tables, RLS, triggers (squashed baseline) | one project, both apps |
+| `supabase/migrations/20260801000000_baseline.sql` | 56 tables, RLS, triggers (squashed baseline) | one project, both apps |
 | `packages/schema/database.types.ts` | Row interfaces + `Row<'orders'>` helper (`make types`) | both |
 | `packages/schema/enums.ts` | 29 `as const` unions + label maps → selects, chips, badges | both |
 | `packages/schema/validation.ts` | Zod — storefront schemas (checkout, review, return, ticket) **and** `productAdminSchema`, `variantAdminSchema`, `discountAdminSchema` | both, already written for both |
 | `supabase/migrations/20260801000000_baseline.sql` | Which list queries are cheap | both |
 
-**Frontend patterns**: none exist in this repo. Conventions come from the
-`nextjs-admin-patterns` skill — colocation, thin server `page.tsx`, one widget per file,
+| `ChetanGk123/next-shadcn-admin-dashboard@template` | The shell: auth pages, dashboard layout, data-table, form primitives, theming | admin now, storefront never — different constraints |
+
+**Frontend patterns**: none exist in this repo *yet* — Phase 0a brings the template's in.
+Conventions come from the `nextjs-admin-patterns` skill — colocation, thin server `page.tsx`, one widget per file,
 semantic tokens, kebab-case, no `any`.
 
 ---
@@ -145,18 +154,49 @@ no stock field.
 
 ## Phase 0 — Workspace scaffold · Low
 
-- [ ] Root `package.json` (private) — `"workspaces": ["apps/*", "types"]`, `"packageManager": "bun@1.x"`, and `dev` / `build` / `lint` / `typecheck` delegating to `turbo`
-- [ ] `bun install` at the root; internal deps use `"@ecom/schema": "workspace:*"`
-- [ ] `turbo.json` — `build` depends on `^build`, outputs `.next/**` (minus `.next/cache/**`); `dev` is `persistent: true`, `cache: false`
-- [ ] **`turbo.json` `globalEnv`/`env` must list the `SUPABASE_*` vars** — Turborepo hashes on declared env only, so an undeclared var means a stale cached build with the wrong project's keys
-- [ ] `packages/schema/package.json` — `@ecom/schema`, exports map, `zod` dependency (see layout above)
-- [ ] `apps/admin` via `bun create next-app` — Next 16 / React 19 / TS strict / Tailwind v4 / Biome / shadcn-ui
-- [ ] `transpilePackages: ["@ecom/schema"]` in `apps/admin/next.config.ts`
-- [ ] Env in `apps/admin/.env.local`: `NEXT_PUBLIC_SUPABASE_URL` (the **public** `https://supabase.<domain>`, for auth only), `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `API_URL` (`http://api:3000` internally on Dokploy). **No service key**
-- [ ] Makefile: `admin-dev`, `admin-build` — leave existing schema targets alone
-- [ ] `.gitignore`: `node_modules/`, `.next/`, `.turbo/` — **`bun.lock` stays tracked**
-- [ ] CI uses `oven-sh/setup-bun`, not `setup-node`
-- [ ] **Validate**: `turbo build` clean, strict on, zero `any`; `make test` still green (the workspace must not disturb the schema toolchain)
+**The workspace half is done.** Written before `apps/api` existed; the API's
+own build did all of it. Recorded rather than deleted, because the reasons
+still hold and the next app scaffolded here needs them:
+
+- [x] Root `package.json` (private) — `"workspaces": ["apps/*", "packages/*"]`, `packageManager: bun@1.3.11`, `dev`/`build`/`lint`/`typecheck` via `turbo`
+- [x] `bun install` at the root; internal deps use `"@ecom/schema": "workspace:*"`
+- [x] `turbo.json` — `build` depends on `^build`, outputs `.next/**` minus `.next/cache/**`; `dev` is `persistent: true`, `cache: false`
+- [x] **`turbo.json` `env` lists the `SUPABASE_*` vars** — Turborepo hashes on declared env only, so an undeclared var means a stale cached build carrying another project's keys
+- [x] `packages/schema/package.json` — `@ecom/schema`, exports map, `zod` dependency
+- [x] `.gitignore`: `node_modules/`, `.next/`, `.turbo/` — **`bun.lock` stays tracked**
+- [x] CI uses `oven-sh/setup-bun`, not `setup-node`
+
+### 0a. Vendor the template
+
+Replaces `bun create next-app`. The point of the template is that the shell
+already exists; the point of this step is that it stops being a separate
+repo and becomes a workspace member with no leftovers.
+
+- [x] Copy the `template` branch to `apps/admin`, **without its `.git`**
+- [x] `package.json` → `@ecom/admin`, private, add `"@ecom/schema": "workspace:*"`
+- [x] **Delete its `bun.lock`** — one lockfile at the workspace root, and a second one is how two versions of the same package end up installed
+- [x] Delete its `compose.yaml` — the root `docker-compose.yml` owns orchestration
+- [x] Delete its `.github/` — CI is one workflow at the root
+- [x] Delete `.gitignore`, `.editorconfig`, `.nvmrc` — the root already has them; a second copy is a second thing to disagree
+- [x] **Reconcile `AGENTS.md` and its `.claude/skills/`.** The template carries its own conventions and this repo has `nextjs-admin-patterns` and `code-layout`. Two sets of house rules in one tree is worse than either. Fold anything genuinely new into the repo's skills and delete the rest
+- [x] **Validate**: `bun install` at the root resolves one zod and one React; `git status` shows no stray dotfiles
+
+### 0b. Make it agree with the workspace
+
+- [x] **zod v4 → v3** in the 5 files that import it — `login-form`, `register-form`, `forgot-password-form`, `profile-form`, `lib/env.ts`. `z.email(…)` → `z.string().email(…)`, `z.url(…)` → `z.string().url(…)`
+- [x] `transpilePackages: ["@ecom/schema"]` in `next.config.mjs` — the package ships TypeScript source, not a build
+- [x] Import one schema from `@ecom/schema` in a form that already exists, to prove the wiring before nine screens depend on it
+- [x] **Validate**: `bun run typecheck` clean across every workspace, strict on, zero `any`; `bun run build` produces `.next`
+
+### 0c. Run it like the API runs
+
+- [x] `apps/admin/Dockerfile`, modelled on `apps/api/Dockerfile`: build context is the **repo root** because `@ecom/schema` is a workspace sibling, with a `dev` stage for hot reload and a `runtime` stage for what deploys
+- [x] `output: "standalone"` in `next.config.mjs`, so the runtime stage copies a self-contained server rather than the whole `node_modules`
+- [x] `admin` service in `docker-compose.yml` — `target: dev`, port **3000**, on the `default` and `dokploy-network` networks with a `${COMPOSE_PROJECT_NAME}-admin` alias
+- [x] `docker-compose.prod.yml`: `target: runtime`, `volumes: !reset []`, `ports: !reset []`, `traefik.docker.network=dokploy-network`
+- [x] Env — **no Supabase client in this app at all** (see Phase 1): `API_URL=http://api:3001` internally. Add to `.env.prod.example` and `docs/deployment.md`
+- [x] `CORS_ORIGINS` on the API must include the admin's origin — `apps/api/.env.example` already assumes 3000
+- [x] **Validate**: `docker compose up -d` brings admin up beside api; the admin container reaches `http://api:3001/health`; `make test` still green — the workspace must not disturb the schema toolchain
 
 > `apps/store` is scaffolded the same way when the storefront track starts — not now.
 > Upgrade path if full client inference is wanted later: extend `scripts/gen_types.py` to
@@ -327,7 +367,7 @@ a store you can operate.
 
 | Phase | Status | Notes |
 |---|---|---|
-| 0 Workspace scaffold | not started | bun + turbo, `@ecom/schema` |
+| 0 Workspace scaffold | **done** | template vendored to `apps/admin`; zod v3, `@ecom/schema` wired, Dockerfile + compose, hot reload verified |
 | 1 Auth & shell | not started | |
 | 2 Data layer | not started | |
 | 3 ~~RPC migration~~ | moved | now api-plan **B3** |

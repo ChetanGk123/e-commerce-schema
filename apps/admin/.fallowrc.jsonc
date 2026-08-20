@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+
+  // No "entry" key on purpose. The Next.js plugin discovers 20 real entry
+  // points (app routes, next.config.mjs, postcss.config.mjs); the scaffold's
+  // src/index.tsx and src/main.tsx do not exist in an App Router project.
+  // Verify with `fallow list`.
+
+  "duplicates": {
+    // The "use client" + sorted-import header is identical across form files
+    // and matched as a 17-line, 3-instance clone. Nobody can act on that.
+    "ignoreImports": true,
+
+    // The scaffold suggests 3. Here that would hide all three real clone groups
+    // — every one is a pair — and report only the import-header false positive.
+    "minOccurrences": 2,
+
+    // Vendored shadcn components. AGENTS.md forbids editing them, so clones
+    // between them cannot be refactored away.
+    "ignore": ["src/components/ui/**"]
+  },
+
+  "rules": {}
+}

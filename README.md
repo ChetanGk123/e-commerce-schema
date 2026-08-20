@@ -111,6 +111,8 @@ packages/
                         schemas shared by every app. database.types.ts is
                         generated: regenerate with `make types`
   client/               @ecom/client — typed `hc` client over the API
+apps/admin/             the admin console — Next.js, calls the API only
+                        see docs/admin-plan.md
 apps/api/               the shared backend — see apps/api/README.md
                         browsable at /docs, importable from /openapi.json
 ```

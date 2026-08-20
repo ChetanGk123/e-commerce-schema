@@ -86,6 +86,23 @@ services:
       - traefik.docker.network=dokploy-network
 
   # ------------------------------------------------------------------
+  admin:
+    build:
+      target: runtime
+    volumes: !reset []
+    ports: !reset []
+    environment:
+      # Container-to-container, fixed for the same reason SUPABASE_URL is on
+      # the api service: a variable here is how someone eventually pastes the
+      # public domain and sends internal traffic out through Traefik and back.
+      API_URL: http://api:3001
+      # This one IS per-deployment -- it is the admin's own public address,
+      # used for metadataBase so canonical and OG URLs resolve absolutely.
+      APP_URL: ${ADMIN_URL:?the admin's public URL, e.g. https://admin.example.com}
+    labels:
+      - traefik.docker.network=dokploy-network
+
+  # ------------------------------------------------------------------
   prometheus:
     # THE TOKEN PROBLEM.
     #

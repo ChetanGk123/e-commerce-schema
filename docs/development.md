@@ -5,7 +5,7 @@ not something it contains, so you start it yourself:
 
 ```sh
 cd "$SUPABASE_DIR" && docker compose up -d     # 13 containers
-cd - && docker compose up -d                   # 6 containers: api + monitoring
+cd - && docker compose up -d                   # 7 containers: api + admin + monitoring
 ```
 
 Every step below ends with a check. Run it.
@@ -22,6 +22,7 @@ Every step below ends with a check. Run it.
 |---|---|---|
 | **Supabase**, 13 containers | `supabase` | `ChetanGk123/dokploy-templates` — **not this repo** |
 | **api**, hot reload | `ecom` | `apps/api/Dockerfile`, `dev` stage |
+| **admin**, hot reload | `ecom` | `apps/admin/Dockerfile`, `dev` stage |
 | **monitoring**, 5 containers | `ecom` | `monitoring/docker-compose.yml` |
 
 Supabase stays out because the template is deliberately kept
@@ -148,8 +149,8 @@ a few minutes. After that it is seconds.
 docker compose ps --format '{{.Service}}\t{{.State}}'
 ```
 
-Expect **6 services, all `running`** — `api` plus the five monitoring
-containers.
+Expect **7 services, all `running`** — `api`, `admin`, and the five
+monitoring containers.
 
 There is no `depends_on` on kong, because Compose can only wait on
 services in its own project. `env.ts` validates at import, so an API
@@ -253,6 +254,24 @@ docker compose logs api | head -20
 Check `docker compose ps auth` — and note this is an HTTP 502 with a
 structured body, so `curl … | jq -r .accessToken` prints a bare `null`
 that looks like an empty result. Ask for the body.
+
+**`admin` logs a `packageManager: "yarn@bun@1.3.11"` error on start.**
+Benign. Next probes for a package manager to look up a registry, walks up
+to the root `package.json`, mis-parses `"bun@1.3.11"` as a yarn spec and
+shells out to yarn. It falls back and carries on — nothing here uses yarn.
+Adding `packageManager` to `apps/admin/package.json` would silence it at
+the cost of a second place declaring the same thing.
+
+**`admin` 500s with `Cannot find module 'next/dist/pages/_error'`, or
+Turbopack logs `Persisting failed ... No such file or directory`.** Its
+`node_modules` are anonymous volumes, and **Compose reuses those across
+recreations** — so after the image's dependency layout changes, the
+container keeps mounting the old one. `next` resolves, its internals do
+not, which reads like a broken Next install:
+
+```sh
+docker compose up -d --force-recreate --renew-anon-volumes admin
+```
 
 **Port 3001 already in use.** Something else is serving it — most likely a
 `bun run dev` from before you had this file:
