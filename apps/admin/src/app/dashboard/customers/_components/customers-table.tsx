@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import type { Customer } from "@/lib/api";
 import type { ApiError } from "@/lib/api-error";
 import { formatDate } from "@/lib/format";
 import { type ListParams, pageHref } from "@/lib/list-params";
@@ -14,15 +15,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-export interface Customer {
-  id: string;
-  email: string | null;
-  phone: string | null;
-  fullName: string | null;
-  anonymizedAt: string | null;
-  createdAt: string;
-}
 
 /**
  * Server components, all three. Nothing here is interactive: paging is a
