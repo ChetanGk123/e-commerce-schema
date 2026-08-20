@@ -2611,6 +2611,25 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     expect(found.map((f) => f.path).sort()).toEqual([...BUCKET_KEYS].sort());
   });
 
+  test("srcset offers three widths through Cloudflare, and only for our own domain", async () => {
+    const ours = `${STORAGE_PUBLIC_URL}/products/p1/photo.jpg`;
+    const set = storage.srcSet(ours) as string;
+
+    // Three candidates with width descriptors, so a browser can choose.
+    expect(set.split(", ")).toHaveLength(3);
+    expect(set).toContain("/cdn-cgi/image/width=400,");
+    expect(set).toContain("/cdn-cgi/image/width=1600,");
+    expect(set).toContain(" 800w");
+    // format=auto is most of the win: AVIF or WebP to browsers that take
+    // them, without storing either.
+    expect(set).toContain("format=auto");
+    // The original path survives intact -- Cloudflare derives from it.
+    expect(set).toContain("/products/p1/photo.jpg");
+
+    // Somebody else's host is not ours to ask Cloudflare to transform.
+    expect(storage.srcSet("https://elsewhere.example/x.jpg")).toBeNull();
+  });
+
   test("a URL from another host resolves to no object at all", async () => {
     // The sweeper settles these as done without calling storage: there is
     // nothing of ours to collect, and retrying twenty times against

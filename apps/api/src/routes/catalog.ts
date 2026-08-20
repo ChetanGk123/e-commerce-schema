@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { throwOnDbError } from "../errors";
 import { PAGE_MAX, jsonError, pageQuery, validationHook } from "../schemas";
+import { srcSet } from "../storage";
 import { anonClient } from "../supabase";
 
 /**
@@ -73,6 +74,15 @@ const Image = z
     id: z.string().uuid(),
     variantId: z.string().uuid().nullable(),
     url: z.string(),
+    /**
+     * Cloudflare edge-resized variants, or null when IMAGE_RESIZE_CDN is
+     * off. Feed it straight to <img srcset> with a matching `sizes`.
+     *
+     * Null rather than a single-entry srcset: a browser given one
+     * candidate uses it at every viewport, which is the heavy original
+     * on a phone -- exactly what this exists to avoid.
+     */
+    srcset: z.string().nullable(),
     altText: z.string().nullable(),
     position: z.number().int(),
   })
@@ -219,6 +229,7 @@ async function decorate(
             id: img.id,
             variantId: img.variant_id,
             url: img.url,
+            srcset: srcSet(img.url),
             altText: img.alt_text,
             position: img.position,
           }
@@ -466,6 +477,7 @@ export const catalogRoute = new OpenAPIHono({ defaultHook: validationHook })
           id: i.id,
           variantId: i.variant_id,
           url: i.url,
+          srcset: srcSet(i.url),
           altText: i.alt_text,
           position: i.position,
         })),

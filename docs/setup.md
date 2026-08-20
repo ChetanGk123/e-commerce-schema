@@ -530,6 +530,39 @@ file type by reading the first bytes rather than trusting `Content-Type`, and ge
 the object key itself — an uploaded filename is an attacker's string, and a repeated one
 would silently overwrite another product's photograph.
 
+### C5b. Resizing at Cloudflare's edge
+
+A 6000px 5MB photograph served to a phone is the most expensive thing this store does per
+page view, and R2's free egress does not make the customer's data plan free.
+
+Cloudflare derives sizes from the stored original on request, so the bucket keeps **one**
+file and reads still never touch your container:
+
+```
+https://images.example.com/cdn-cgi/image/width=800,quality=82,format=auto/products/<id>/<uuid>.jpg
+```
+
+Turn it on in two places:
+
+1. **Cloudflare** → your zone → Speed → Optimization → **Image Resizing** (needs a plan
+   that includes it). Nothing works without this; the `/cdn-cgi/image/` path simply 404s.
+2. **The API** → `IMAGE_RESIZE_CDN=true`. Storefront image responses then carry a `srcset`
+   with 400/800/1600 candidates. Off by default, because advertising a srcset the zone
+   cannot serve is a **broken page rather than a slow one**.
+
+**`STORAGE_PUBLIC_URL` must be a Cloudflare-proxied custom domain** on the bucket. The
+`r2.dev` development subdomain is not proxied and has no `/cdn-cgi/image/`. C5a already
+says not to use it in production; this is the second reason.
+
+`format=auto` is most of the benefit — AVIF or WebP to browsers that accept them, without
+storing either.
+
+**Why not resize on upload.** That means storing derivatives, choosing the sizes before the
+design exists, and losing the original — a later redesign wanting larger images cannot get
+them back. Deriving on demand keeps one file and one decision. It is also why
+`MAX_IMAGE_KB` is 1MB rather than 5: the stored original only has to be good enough to
+derive from, not the largest file a phone can produce.
+
 ### C6. What you lose, and the substitutes
 
 | Hosted feature | Substitute |

@@ -311,6 +311,50 @@ async function walk(prefix: string, found: StoredObject[], depth: number): Promi
 }
 
 /**
+ * Widths a storefront actually uses, and nothing more.
+ *
+ * A phone at 2x wants ~800, a desktop grid tile ~400, a zoomed detail
+ * view ~1600. Offering a dozen sizes just spreads the cache thinner --
+ * every distinct width is a separate object for Cloudflare to hold and a
+ * separate first request somebody pays for.
+ */
+const CDN_WIDTHS = [400, 800, 1600] as const;
+
+/**
+ * A `srcset` built on Cloudflare's edge resizing, or null when it is off.
+ *
+ * WHY THE EDGE AND NOT ON UPLOAD. Resizing when the file arrives means
+ * storing derivatives, deciding the sizes before knowing the design, and
+ * losing the original -- a later redesign wanting larger images cannot
+ * get them back. Doing it at the edge keeps one original and derives on
+ * demand, and it costs this service nothing: reads still resolve to the
+ * bucket's custom domain and never touch the container. That is the same
+ * reason the read path bypasses Storage in the first place.
+ *
+ * The `/cdn-cgi/image/...` prefix is served by Cloudflare on any proxied
+ * zone with Image Resizing enabled. `format=auto` is most of the win --
+ * it serves AVIF or WebP to browsers that accept them without storing
+ * either.
+ *
+ * Returns null rather than an unresized srcset when the flag is off: a
+ * srcset whose entries 404 is a broken page, and a page with no srcset
+ * is merely a heavy one.
+ */
+export function srcSet(url: string): string | null {
+  if (!env.IMAGE_RESIZE_CDN) return null;
+
+  const base = env.STORAGE_PUBLIC_URL?.replace(/\/$/, "");
+  // Only for objects on the custom domain. An image somebody pointed at
+  // another host is not ours to ask Cloudflare to transform.
+  if (!base || !url.startsWith(`${base}/`)) return null;
+
+  const path = url.slice(base.length + 1);
+  return CDN_WIDTHS.map(
+    (w) => `${base}/cdn-cgi/image/width=${w},quality=82,format=auto/${path} ${w}w`,
+  ).join(", ");
+}
+
+/**
  * The object path back out of a stored URL.
  *
  * Null when the URL points somewhere this service did not put it -- an

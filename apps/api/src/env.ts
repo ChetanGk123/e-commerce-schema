@@ -182,9 +182,42 @@ const schema = z.object({
    */
   STORAGE_PUBLIC_URL: blankAsUnset(z.string().url().optional()),
 
-  /** Largest image accepted, in kilobytes. Separate from MAX_BODY_KB,
-   *  which is sized for JSON and would reject every photograph. */
-  MAX_IMAGE_KB: z.coerce.number().int().min(64).max(51_200).default(5_120),
+  /**
+   * Largest image accepted, in kilobytes. Separate from MAX_BODY_KB,
+   * which is sized for JSON and would reject every photograph.
+   *
+   * One megabyte, not five. The API buffers the whole upload in memory
+   * (`await file.arrayBuffer()`), so this number times concurrency is
+   * resident bytes -- and the alternative, presigned uploads straight to
+   * R2, was declined because it puts R2 credentials in this process.
+   * Capping is the cheaper half of the same trade.
+   *
+   * It is only affordable because Cloudflare resizes at the edge
+   * (setup.md C5b): the stored original needs to be good enough to
+   * derive from, not the largest file a phone can produce. A 2000px JPEG
+   * at sensible quality is comfortably under this, and 2000px is more
+   * than a product zoom needs.
+   *
+   * Raise it if you are archiving originals rather than serving them --
+   * but then watch the memory, because nothing else bounds it.
+   */
+  MAX_IMAGE_KB: z.coerce.number().int().min(64).max(51_200).default(1_024),
+
+  /**
+   * Whether image URLs advertise Cloudflare's edge resizing.
+   *
+   * Off by default, because turning it on when the zone does not have
+   * Image Resizing enabled produces srcset entries that 404 -- a broken
+   * page rather than a slow one, which is a worse trade.
+   *
+   * Requires STORAGE_PUBLIC_URL to be a Cloudflare-PROXIED custom domain
+   * on the bucket. The r2.dev development subdomain is not proxied and
+   * /cdn-cgi/image/ does not exist there.
+   */
+  IMAGE_RESIZE_CDN: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
 
   /**
    * The three rails on the image reconciler. It removes objects
