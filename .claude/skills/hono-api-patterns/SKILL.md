@@ -21,7 +21,7 @@ React/Next-shaped. This is the API's own convention.
 **One zod schema, four outputs.** A schema written once in `@ecom/schema`
 becomes runtime validation, TypeScript types, the OpenAPI document, and the
 `hc` client type. Never redeclare a shape that already exists in
-`types/validation.ts` — importing it is what keeps the contract from drifting
+`packages/schema/validation.ts` — importing it is what keeps the contract from drifting
 across three consumers.
 
 ## Folder structure
@@ -226,7 +226,7 @@ line outlives the request and lands in every backup of the log store.
 | `app.get("/x", handler)` | `createRoute` + `.openapi()` | Invisible to OpenAPI and to `hc` |
 | Service key for a staff write | `callerClient(token)` | Anonymises `audit_logs` |
 | `return c.json({ error: err.message })` | Map it, or return a support code | Leaks constraint and table names |
-| Redeclare a zod shape already in `types/validation.ts` | Import it | Three consumers drift apart |
+| Redeclare a zod shape already in `packages/schema/validation.ts` | Import it | Three consumers drift apart |
 | `update product_variants set stock` | Insert `inventory_movements` | Stock is a ledger cache — see `schema-rules` |
 | Start a server in `app.ts` | Keep it in `server.ts` | Importing `AppType` would bind a port |
 | Test by booting a server on a port | `app.request()` | Slower, flakier, needs a free port |

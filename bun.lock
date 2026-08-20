@@ -43,7 +43,7 @@
         "typescript": "^5.9",
       },
     },
-    "types": {
+    "packages/schema": {
       "name": "@ecom/schema",
       "version": "0.0.0",
       "dependencies": {
@@ -61,7 +61,7 @@
 
     "@ecom/client": ["@ecom/client@workspace:packages/client"],
 
-    "@ecom/schema": ["@ecom/schema@workspace:types"],
+    "@ecom/schema": ["@ecom/schema@workspace:packages/schema"],
 
     "@hono/swagger-ui": ["@hono/swagger-ui@0.6.1", "", { "peerDependencies": { "hono": ">=4.0.0" } }, "sha512-sJTvldu1GPeEPfyeLG7gRj+W4vEuD+JDi+JjJ3TJs/DvMUtBLs0KJO5yokGegWWdy5qrbdnQGekbhgNRmPmYKQ=="],
 

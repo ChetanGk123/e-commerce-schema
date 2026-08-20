@@ -21,7 +21,7 @@ WORKDIR /repo
 COPY package.json bun.lock ./
 COPY apps/api/package.json apps/api/
 COPY packages/client/package.json packages/client/
-COPY types/package.json types/
+COPY packages/schema/package.json packages/schema/
 RUN bun install --frozen-lockfile
 
 COPY . .

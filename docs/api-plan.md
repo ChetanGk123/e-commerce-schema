@@ -95,7 +95,7 @@ available if B13 ever needs them.
 |---|---|---|
 | Runtime | Bun | Already the package manager |
 | Framework | **Hono** | Web-standard `Request`/`Response`, tiny, runtime-agnostic — you can leave Bun without a rewrite |
-| Contract | **`@hono/zod-openapi`** | One Zod schema → runtime validation + TS types + OpenAPI 3.1 + typed client. `types/validation.ts` already exists; this makes it the contract |
+| Contract | **`@hono/zod-openapi`** | One Zod schema → runtime validation + TS types + OpenAPI 3.1 + typed client. `packages/schema/validation.ts` already exists; this makes it the contract |
 | Typed client | `hc` (Hono RPC) | Frontends import server types; a breaking route change fails their typecheck |
 | Data | `@supabase/supabase-js` + plpgsql RPCs | Preserves RLS **and** `auth.uid()`, so the audit trail survives |
 | JWT | `jose` | Verify Supabase tokens — **HS256 against the shared `JWT_SECRET`** (confirmed from the template) |
@@ -151,7 +151,7 @@ second authorization model. **Not doing it.** Escape hatch if RPC authoring turn
 | Data access | `docs/schema_guide.md:291` | "Two doors." The API is a **third** door and honors the same rule: if getting it wrong costs money, prices are read from the DB, never from the request body |
 | Tests | `supabase/tests/01_invariants.sql` | Assertions that *try* to break a rule and confirm refusal. No framework, no fixtures |
 | Naming | `supabase/migrations/*.sql` | `YYYYMMDDHHMMSS_area.sql`, snake_case in SQL, kebab-case for TS files |
-| Validation | `types/validation.ts` | Zod already covers checkout, returns, tickets, reviews and the three admin forms. The API validates with these, not copies |
+| Validation | `packages/schema/validation.ts` | Zod already covers checkout, returns, tickets, reviews and the three admin forms. The API validates with these, not copies |
 | **Logging** | **none exists** | No logging convention in this repo. Not inventing one beyond: structured JSON, request id, no secrets |
 
 ---

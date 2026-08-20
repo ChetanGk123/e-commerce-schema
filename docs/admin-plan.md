@@ -52,21 +52,26 @@ e-commerce-schema/           workspace root
 │   ├── api/                 Hono on Bun — see docs/api-plan.md
 │   ├── admin/               this plan
 │   └── store/               storefront (track below)
-├── types/                   → workspace package @ecom/schema, IN PLACE
-│   ├── package.json         new: name + exports map + zod dep
-│   ├── database.types.ts    unchanged, still written by `make types`
-│   ├── enums.ts             unchanged
-│   └── validation.ts        unchanged — already has both storefront and admin schemas
+├── packages/
+│   ├── schema/              workspace package @ecom/schema
+│   │   ├── package.json     name + exports map + zod dep
+│   │   ├── database.types.ts   written by `make types`
+│   │   ├── enums.ts
+│   │   └── validation.ts    already has both storefront and admin schemas
+│   └── client/              @ecom/client — typed `hc` client over the API
 ├── supabase/                unchanged, single project, both apps point at it
 ├── scripts/ · docs/ · Makefile   unchanged
 ```
 
-`types/` is **not moved**. Adding a `package.json` beside the existing files makes it a
-workspace package without touching `scripts/gen_types.py`, the `make types` target, or a
-single import inside those files. Moving it would mean editing the generator to chase it.
+**Moved to `packages/schema/`** (2026-08-20). This file previously argued for leaving it
+at the repo root, on the grounds that moving it meant editing the generator to chase it.
+That cost turned out to be one string in `scripts/gen_types.py` — too small to buy a
+permanent exception in the workspaces array, where `types` had to sit as a third entry
+beside `apps/*` and `packages/*`. Nothing imports by path: every consumer already used
+`@ecom/schema/...`, so no import changed.
 
 ```jsonc
-// types/package.json
+// packages/schema/package.json
 {
   "name": "@ecom/schema",
   "private": true,
@@ -89,11 +94,11 @@ ships raw TypeScript, and without this the build fails on the first import.
 | Decision | Choice | Why |
 |---|---|---|
 | Package manager | **Bun** | Install speed, and `bun.lock` is the only lockfile in the tree |
-| Layout | Bun workspaces: `apps/api`, `apps/admin`, `apps/store`, `types/` as `@ecom/schema` | All three need the same enums, row types and Zod schemas |
+| Layout | Bun workspaces: `apps/*` and `packages/*`; `packages/schema` is `@ecom/schema` | All three need the same enums, row types and Zod schemas |
 | Hosting | **Dokploy**, self-hosted Supabase from `ChetanGk123/dokploy-templates` | End-state target. Backups become your responsibility — see api-plan risks |
 | Monorepo tooling | Bun workspaces + **Turborepo** | One `turbo.json`, no layout change. Buys `turbo dev` for both apps, CI remote caching across two Next builds, and task ordering so `@ecom/schema` typechecks first. Not Nx — its generators/plugins are scaffolding this repo won't use |
 | Next.js runtime | **Node, not Bun** | `bun run dev` respects the `next` binary's `#!/usr/bin/env node` shebang, so Next runs on Node by default. Do not add `--bun` — Bun is the installer and script runner here, not the server runtime |
-| Shared package | `types/` promoted in place | Keeps `make types` and `gen_types.py` working untouched |
+| Shared package | `packages/schema` | Every library lives under `packages/`; `make types` writes there |
 | Shared UI package | **None** | Dense admin tables and a marketing storefront have opposite constraints. Create `packages/ui` only when a second app imports the same component |
 | Auth for data (admin) | Session via `@supabase/ssr`; **data via `apps/api`** with that JWT as a bearer token | The API forwards it to Postgres, so `auth.uid()` — and the audit trail — survives |
 | Service key | **Not in this app.** Only `apps/api` holds it | Keeps the blast radius in one deployable |
@@ -110,9 +115,9 @@ ships raw TypeScript, and without this the build fails on the first import.
 | Asset | Use | Shared? |
 |---|---|---|
 | `supabase/migrations/20260801000000_baseline.sql` | 51 tables, RLS, triggers (squashed baseline) | one project, both apps |
-| `types/database.types.ts` | Row interfaces + `Row<'orders'>` helper (`make types`) | both |
-| `types/enums.ts` | 29 `as const` unions + label maps → selects, chips, badges | both |
-| `types/validation.ts` | Zod — storefront schemas (checkout, review, return, ticket) **and** `productAdminSchema`, `variantAdminSchema`, `discountAdminSchema` | both, already written for both |
+| `packages/schema/database.types.ts` | Row interfaces + `Row<'orders'>` helper (`make types`) | both |
+| `packages/schema/enums.ts` | 29 `as const` unions + label maps → selects, chips, badges | both |
+| `packages/schema/validation.ts` | Zod — storefront schemas (checkout, review, return, ticket) **and** `productAdminSchema`, `variantAdminSchema`, `discountAdminSchema` | both, already written for both |
 | `supabase/migrations/20260801000000_baseline.sql` | Which list queries are cheap | both |
 
 **Frontend patterns**: none exist in this repo. Conventions come from the
@@ -144,7 +149,7 @@ no stock field.
 - [ ] `bun install` at the root; internal deps use `"@ecom/schema": "workspace:*"`
 - [ ] `turbo.json` — `build` depends on `^build`, outputs `.next/**` (minus `.next/cache/**`); `dev` is `persistent: true`, `cache: false`
 - [ ] **`turbo.json` `globalEnv`/`env` must list the `SUPABASE_*` vars** — Turborepo hashes on declared env only, so an undeclared var means a stale cached build with the wrong project's keys
-- [ ] `types/package.json` — `@ecom/schema`, exports map, `zod` dependency (see layout above)
+- [ ] `packages/schema/package.json` — `@ecom/schema`, exports map, `zod` dependency (see layout above)
 - [ ] `apps/admin` via `bun create next-app` — Next 16 / React 19 / TS strict / Tailwind v4 / Biome / shadcn-ui
 - [ ] `transpilePackages: ["@ecom/schema"]` in `apps/admin/next.config.ts`
 - [ ] Env in `apps/admin/.env.local`: `NEXT_PUBLIC_SUPABASE_URL` (the **public** `https://supabase.<domain>`, for auth only), `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `API_URL` (`http://api:3000` internally on Dokploy). **No service key**
@@ -295,7 +300,7 @@ layout — a dense admin table and a marketing product page have opposite constr
 | Transaction-mode pooling breaks invoice numbering | Medium | High | RPCs make each op one statement; session-mode connection string for anything else (`README.md:120`) |
 | Variant option values inserted in a loop | High (easy mistake) | Medium | Single batched insert + a test |
 | Audit trail goes anonymous | High if the API uses the service key | Medium | Owned by api-plan B1; asserted there by test |
-| `types/database.types.ts` drifts | Medium | Medium | `make types` in CI, fail on diff |
+| `packages/schema/database.types.ts` drifts | Medium | Medium | `make types` in CI, fail on diff |
 | Reservation sweeper not scheduled | Medium | High | Phase 6 surfaces last-run time |
 | Admin and store auth cookies collide on one domain | Medium | High | Distinct `cookieOptions.name` per app; Phase 1 validates with both open |
 | Storefront-scoped API routes leak `cost_price` | Medium | High | api-plan B4 splits storefront vs admin catalog routes and validates it |

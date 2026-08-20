@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generates types/database.types.ts by introspecting a live database.
+Generates packages/schema/database.types.ts by introspecting a live database.
 
 Run via `make types`, which builds a throwaway container from the migrations
 first. Introspection rather than hand-editing, because nullability is the
@@ -250,10 +250,10 @@ def main():
         rows="\n".join(f"  {t}: {n};" for t, n in merged.items())
     ))
 
-    with open("types/database.types.ts", "w") as f:
+    with open("packages/schema/database.types.ts", "w") as f:
         f.write("\n".join(parts))
 
-    print(f"==> types/database.types.ts ({len(TABLES)} tables, {len(VIEWS)} views)")
+    print(f"==> packages/schema/database.types.ts ({len(TABLES)} tables, {len(VIEWS)} views)")
 
 
 HEADER = '''/**

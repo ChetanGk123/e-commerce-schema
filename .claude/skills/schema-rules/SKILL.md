@@ -90,7 +90,7 @@ than becoming invisible to its own owner. Guests get no `customers` row —
 their identity lives on `orders.email` and `carts.session_id`.
 
 Phones are E.164 (`+919876543210`). The `phone` transform in
-`types/validation.ts` normalises to it. A blocklist storing a bare
+`packages/schema/validation.ts` normalises to it. A blocklist storing a bare
 10-digit number blocks nobody.
 
 ## Known accepted risk
