@@ -1,0 +1,104 @@
+# Monitoring for apps/api. Nothing here touches the application.
+#
+# It consumes what the API already publishes -- GET /metrics in
+# Prometheus exposition format, and pino JSON on stdout -- so the API is
+# unaware this stack exists and stays deployable without it.
+#
+# On Dokploy: join the API's network so `api:3001` resolves, and expose
+# only Grafana through Traefik. Prometheus, Alertmanager and Loki have no
+# authentication of their own and must not be published.
+
+name: ecom-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 30d matches Loki's retention, so a metric and the log line
+      # explaining it disappear together rather than one outliving the
+      # other and looking like data loss.
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      # Gitignored. Create it with the one-liner in the README.
+      - ./secrets/metrics_token:/etc/prometheus/metrics_token:ro
+      - prometheus-data:/prometheus
+    networks: [monitoring, api]
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks: [monitoring]
+
+  loki:
+    image: grafana/loki:3.3.2
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    networks: [monitoring]
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    restart: unless-stopped
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only, and it is the whole security story for this container:
+      # the Docker socket is root on the host. Nothing else here mounts it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on: [loki]
+    networks: [monitoring]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    environment:
+      # Change this before exposing it anywhere. There is no other
+      # authentication in front of this stack.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # The dashboard is provisioned from a file in git; anonymous edits
+      # would be lost on restart and confuse whoever made them.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      # Localhost only. On Dokploy, drop this and use a Traefik label
+      # instead -- the same pattern the Supabase template uses for kong.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus, loki]
+    networks: [monitoring]
+
+networks:
+  monitoring:
+  # The API's network. On Dokploy this is `dokploy-network`, already
+  # created by the platform -- set MONITORING_API_NETWORK to it. Locally
+  # it is whatever network the API container is on.
+  api:
+    name: ${MONITORING_API_NETWORK:-dokploy-network}
+    external: true
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  loki-data:
+  alloy-data:
+  grafana-data:

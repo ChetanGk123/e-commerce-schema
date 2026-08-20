@@ -11,6 +11,7 @@ trust. **Plans** record what was decided and how far it got — they carry a
 | [setup.md](setup.md) | Empty project → a database you can build against, ~20 min. Part A hosted Supabase, Part B plain Postgres, Part C self-hosted. Every step ends in a check. |
 | [schema_guide.md](schema_guide.md) | Plain-English tour of all 51 tables and the flows that move between them. No technical background assumed. |
 | [image-management.md](image-management.md) | How images get into the store and how they leave — upload, and the deletion path that needed the storage GC. |
+| [monitoring.md](monitoring.md) | Standing up Grafana, Prometheus and Loki against the API's existing `/metrics` and pino output, and reading the result. The stack itself is in `monitoring/`. |
 | [testing-accounts.md](testing-accounts.md) | Sign-ins for exercising the API by hand via Swagger UI, Postman or curl. **Local only.** |
 
 ## Plans
