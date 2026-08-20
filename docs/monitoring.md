@@ -65,31 +65,45 @@ least 16; anything shorter is refused at boot.
 ### Step 2. Configure the stack
 
 ```sh
-cp monitoring/.env.example monitoring/.env
 docker network create ecom-local
+cp monitoring/.env.example monitoring/.env
 ```
 
-Edit `monitoring/.env`:
-
-```
-MONITORING_API_NETWORK=ecom-local
-GRAFANA_PASSWORD=pick-something
-```
-
-**Put these in `.env`, never on the command line.** The API network is
-`external: true`, so its name is resolved when a container is *created*
-and baked in from then on. One `docker compose up -d` that forgets an
-inline `MONITORING_API_NETWORK=` silently rebinds Prometheus to the wrong
-network, and the symptom is not "wrong network" — it is `lookup api ... no
-such host`, which reads like DNS or a dead API.
-
-**Check:**
+Now put two settings **in that file**. Typing them at a shell prompt sets
+shell variables instead, which Compose never sees and which vanish when
+the terminal closes — so write the file:
 
 ```sh
+cat > monitoring/.env <<'EOF'
+MONITORING_API_NETWORK=ecom-local
+GRAFANA_PASSWORD=pick-something
+EOF
+```
+
+There are two `.env` files in this repo and they are not
+interchangeable. These belong in **`monitoring/.env`**. In
+`apps/api/.env` they are inert — the API ignores unknown keys — and the
+monitoring stack goes on using the example defaults with no complaint.
+
+That silence is the problem. The API network is `external: true`, so its
+name is resolved when a container is *created* and baked in from then on.
+Leave `MONITORING_API_NETWORK` at its `dokploy-network` default while your
+API is somewhere else, and Prometheus attaches to the wrong network. The
+symptom names neither file:
+
+```
+Get "http://api:3001/metrics": dial tcp: lookup api ... no such host
+```
+
+**Check:** read the file back, rather than trusting that the edit landed.
+
+```sh
+grep -v '^#' monitoring/.env | grep .
 docker network ls --filter name=ecom-local --format '{{.Name}}'
 ```
 
-Expect **ecom-local**.
+Expect **`MONITORING_API_NETWORK=ecom-local`** and **ecom-local**. If the
+first shows `dokploy-network`, the edit went somewhere else.
 
 ---
 
@@ -101,13 +115,28 @@ the *same* token.
 ```sh
 docker build -t ecom-api-local .
 docker run -d --name api --network ecom-local \
-  -e SUPABASE_URL="$SUPABASE_URL" \
-  -e SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
-  -e SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_SERVICE_ROLE_KEY" \
-  -e SUPABASE_JWT_SECRET="$SUPABASE_JWT_SECRET" \
+  --env-file apps/api/.env \
+  -e NODE_ENV=production \
   -e METRICS_TOKEN="$(cat monitoring/secrets/metrics_token)" \
   ecom-api-local
 ```
+
+**`--env-file`, not a list of `-e $SUPABASE_URL`.** Those values live in
+`apps/api/.env`; they are not exported into your shell. Passing
+`-e SUPABASE_URL="$SUPABASE_URL"` from a shell that never set it hands the
+container an empty string, and `env.ts` — which validates at import —
+refuses to boot with `SUPABASE_URL: Invalid url`.
+
+**`-e NODE_ENV=production` is not decoration.** `apps/api/.env` says
+`development`, and `--env-file` would override the image's own
+`NODE_ENV=production`. In development `logger.ts` sends pino through a
+pino-pretty worker thread, and a worker cannot resolve its target out of
+a single bundled file — the process dies at boot with `DataCloneError:
+The object can not be cloned`, which names nothing useful. The Dockerfile
+carries the long version of this warning.
+
+Order matters: `-e` wins over `--env-file`, which is what makes the
+override work.
 
 **Check:**
 
@@ -167,6 +196,19 @@ in that same output says which of the three causes it is.
 ### Step 6. Open Grafana
 
 <http://127.0.0.1:3000> — user `admin`, password from `.env`.
+
+**If it rejects the password**, it is almost certainly the one from the
+*first* start. `GF_SECURITY_ADMIN_PASSWORD` is read only when Grafana
+initialises its database; after that the value lives in the
+`grafana-data` volume and editing `.env` changes nothing, restart or no
+restart. So a first `up` with the unedited `.env.example` leaves you on
+`change-me` permanently.
+
+Either log in with that and change it in the UI, or destroy the volume:
+
+```sh
+docker compose down -v      # also discards anything you built in the UI
+```
 
 **Check:** the dashboard **E-commerce API** is already in the list. It is
 provisioned from `monitoring/grafana/dashboards/ecom-api.json`, so it
@@ -243,6 +285,35 @@ at ingest:
 
 pino levels are numeric: **30** info, **40** warn, **50** error, **60**
 fatal.
+
+### Worked example: a request that returned nothing
+
+```sh
+curl -s localhost:3001/auth/sign-in -H 'Content-Type: application/json' \
+  -d '{"email":"staff@test.local","password":"…"}' | jq -r .accessToken
+# null
+```
+
+`null` is what `jq -r` prints for a field that is not there, so a failure
+and an empty result look identical. **Ask for the status and the body:**
+
+```sh
+curl -s -w '\n%{http_code}\n' localhost:3001/auth/sign-in …
+# {"error":{"code":"auth_unavailable","message":"The auth service could not
+#  be reached. Try again.","requestId":"cc42c3bc-…"}}
+# 502
+```
+
+Every failure from this API carries a `requestId`, and that is the handle
+into Loki — the caller gets a mapped message while the detail stays in the
+log under that id:
+
+```logql
+{container="api"} | json | reqId = "cc42c3bc-ed09-4613-9bda-bc9eff7fd760"
+```
+
+(`auth_unavailable` specifically means GoTrue is unreachable —
+`/auth/*` proxies to it. Check that Supabase is actually running.)
 
 Useful PromQL, in Grafana's **Explore** tab:
 
