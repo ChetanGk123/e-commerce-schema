@@ -2360,6 +2360,54 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     expect(res.detail).toContain("500");
   });
 
+  test("alt text is required, and empty is a valid answer", async () => {
+    // T15. `alt=""` is the correct markup for a decorative image, so
+    // demanding non-empty text does not produce accessibility -- it
+    // produces "image1.jpg", read aloud. What is required is that
+    // somebody decided.
+    const PROD = "11111111-0000-4000-8000-00000000ff0b";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-alt', 'Alt', 'active') on conflict (id) do nothing;
+    `);
+    const staff = { Authorization: `Bearer ${await mintToken("authenticated", STAFF_ID)}` };
+    const jpeg = () =>
+      new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0])]);
+
+    const without = new FormData();
+    without.append("file", jpeg(), "x.jpg");
+    const missing = await app.request(`/admin/products/${PROD}/images`, {
+      method: "POST",
+      body: without,
+      headers: staff,
+    });
+    expect(missing.status).toBe(400);
+    // Either the route schema or the handler may answer first; what
+    // matters is that it is refused, and refused BEFORE anything is
+    // stored. A 400 raised after the upload leaves an object no row will
+    // ever point at -- the exact failure T3 exists to prevent.
+    expect(
+      await sqlValue(`select count(*) from product_images where product_id = '${PROD}'`),
+    ).toBe("0");
+
+    // Deliberately blank: accepted, and stored as blank rather than
+    // collapsed to null, because the difference is the decision.
+    const decorative = new FormData();
+    decorative.append("file", jpeg(), "x.jpg");
+    decorative.append("altText", "");
+    const ok = await app.request(`/admin/products/${PROD}/images`, {
+      method: "POST",
+      body: decorative,
+      headers: staff,
+    });
+    expect(ok.status).toBe(201);
+    expect(await sqlValue(`select alt_text from product_images where product_id = '${PROD}'`)).toBe(
+      "",
+    );
+
+    await sql(`delete from products where id = '${PROD}'; delete from storage_gc_queue;`);
+  });
+
   test("a variant from another product is refused before anything is stored", async () => {
     // T3. The composite foreign key would refuse the insert anyway --
     // but by then the bytes are in the bucket with no row to point at
@@ -2385,6 +2433,7 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
       "x.jpg",
     );
     form.append("variantId", OTHER_VARIANT);
+    form.append("altText", "a photograph of the wrong product");
 
     const res = await app.request(`/admin/products/${MINE}/images`, {
       method: "POST",

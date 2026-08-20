@@ -929,7 +929,7 @@ const uploadImageRoute = createRoute({
   tags: ["admin", "catalog"],
   summary: "Upload a product image",
   description:
-    "multipart/form-data with a `file` part. `altText`, `position` and `variantId` are optional parts alongside it.\n\nThe file type is decided by reading the first bytes, not by the declared Content-Type: JPEG, PNG, WebP and AVIF are accepted and anything else is a 415, whatever the header claims. The stored key is a uuid this service generates — an uploaded filename is an attacker's string, and a repeated one would overwrite somebody else's photograph.\n\n`variantId` must belong to this product; the composite foreign key refuses otherwise.\n\n503 when no bucket is configured, which is a deployment that has not set STORAGE_BUCKET rather than a request that did anything wrong.",
+    "multipart/form-data with a `file` part. `altText` is **required**; `position` and `variantId` are optional.\n\nAlt text may be **empty**, and that is a real answer rather than a loophole: `alt=\"\"` is the correct markup for a decorative image, while a rule demanding non-empty text produces \"image1.jpg\" -- which a screen reader reads out. What is required is that somebody decided, not that somebody typed.\n\nThe file type is decided by reading the first bytes, not by the declared Content-Type: JPEG, PNG, WebP and AVIF are accepted and anything else is a 415, whatever the header claims. The stored key is a uuid this service generates — an uploaded filename is an attacker's string, and a repeated one would overwrite somebody else's photograph.\n\n`variantId` must belong to this product; the composite foreign key refuses otherwise.\n\n503 when no bucket is configured, which is a deployment that has not set STORAGE_BUCKET rather than a request that did anything wrong.",
   security: [{ bearerAuth: [] }],
   middleware: [requireAuth, requireStaff] as const,
   request: {
@@ -939,7 +939,21 @@ const uploadImageRoute = createRoute({
         "multipart/form-data": {
           schema: z.object({
             file: z.any().openapi({ type: "string", format: "binary" }),
-            altText: z.string().max(200).optional(),
+            /**
+             * Required, and allowed to be empty (T15).
+             *
+             * The distinction is the whole point. `alt=""` is the
+             * CORRECT markup for a decorative image, and a rule that
+             * demands non-empty text produces "image1.jpg" and
+             * "product photo" -- which a screen reader reads aloud, and
+             * which is worse than saying nothing. So what is required is
+             * that somebody decided, not that somebody typed.
+             *
+             * Enforced in the handler rather than here, because a
+             * multipart part that is absent and one that is empty both
+             * arrive as falsy and only the handler can tell them apart.
+             */
+            altText: z.string().max(200),
             position: z.string().optional(),
             variantId: z.string().uuid().optional(),
           }),
@@ -978,7 +992,10 @@ const patchImage = createRoute({
         "application/json": {
           schema: z
             .object({
-              altText: z.string().max(200).nullable().optional(),
+              // Not nullable: an image that has alt text cannot be
+              // returned to "nobody decided". Empty is still allowed,
+              // which is how an image becomes decorative after the fact.
+              altText: z.string().max(200).optional(),
               position: z.number().int().nonnegative().optional(),
               variantId: z.string().uuid().nullable().optional(),
             })
@@ -1047,6 +1064,25 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
       });
     }
 
+    // Before the upload too, and for the same reason as T3: a 400 raised
+    // after the bytes are stored leaves an object no row will ever point
+    // at. The route schema also marks altText required, so this rarely
+    // fires -- but the handler owns the rule, because multipart
+    // validation is the loosest part of the stack and `file` is z.any().
+    //
+    // Present, not non-empty. `form.get` answers null for a part never
+    // sent and "" for one deliberately left blank, and those are
+    // different answers: the first did not think about it, the second
+    // decided the image is decorative. Only the first is refused.
+    const altText = form.get("altText");
+    if (typeof altText !== "string") {
+      throw new HTTPException(400, {
+        message:
+          "Send an `altText` part. Leave it empty if the image is decorative -- that is a valid answer, and it is what alt=\"\" means.",
+        cause: { code: "alt_text_required" },
+      });
+    }
+
     // Before the upload, not after (T3). The composite foreign key would
     // refuse this variant anyway -- but by then the bytes are in the
     // bucket with no row to point at them, and the only thing that would
@@ -1083,7 +1119,6 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
     const { url } = await uploadImage(`products/${id}`, bytes, kind);
 
     const position = Number(form.get("position") ?? 0);
-    const altText = form.get("altText");
 
     const { data, error } = await caller.db
       .from("product_images")
@@ -1091,7 +1126,9 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
         product_id: id,
         variant_id: typeof variantId === "string" && variantId ? variantId : null,
         url,
-        alt_text: typeof altText === "string" && altText ? altText : null,
+        // Stored as given, including empty. Collapsing "" to null would
+        // throw away the decision the upload just made.
+        alt_text: altText,
         position: Number.isFinite(position) ? position : 0,
       })
       .select("id, product_id, variant_id, url, alt_text, position")

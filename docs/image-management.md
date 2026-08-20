@@ -375,8 +375,18 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
 - [ ] **T14. Resize and re-encode on upload.** `imgproxy` is already in the stack. Serving a
   6000px 5MB JPEG to a phone is the most expensive thing this store does per page view, and
   R2's free egress does not make the customer's data plan free
-- [ ] **T15. Alt text as a requirement, not a field.** Optional today. A storefront with no
-  alt text is inaccessible and invisible to image search
+- [x] **T15. Alt text as a requirement, not a field** — **done**.
+  - **Required to be present, allowed to be empty**, and the distinction is the whole
+    point. `alt=""` is the *correct* markup for a decorative image, and a rule demanding
+    non-empty text does not produce accessibility — it produces `image1.jpg`, read aloud by
+    a screen reader. What is required is that somebody decided, not that somebody typed.
+  - Empty is stored as empty rather than collapsed to null, because the difference *is* the
+    decision. `PATCH` can set it to `""` but no longer back to null: an image cannot return
+    to "nobody decided"
+  - **The check had to move before the upload.** First version put it after, which is the
+    orphan-creating pattern T3 existed to remove: a 400 raised once the bytes are stored
+    leaves an object no row will ever point at. The test asserts the refusal *and* that
+    nothing was stored
 
 ---
 
