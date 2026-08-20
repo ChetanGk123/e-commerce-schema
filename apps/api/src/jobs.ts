@@ -3,7 +3,7 @@ import { publishOps } from "./metrics";
 import { logger as log } from "./logger";
 import { type Message, mailerConfigured, send } from "./mailer";
 import { type RazorpayEvent, processEvent } from "./routes/webhooks";
-import { deleteObject, pathFromUrl, storageConfigured } from "./storage";
+import { deleteObject, listObjects, pathFromUrl, storageConfigured } from "./storage";
 import { serviceClient } from "./supabase";
 
 /**
@@ -324,6 +324,215 @@ async function sweepStorage(): Promise<void> {
 
   if (collected > 0) log.info({ collected }, "jobs.storage_collected");
   if (failed > 0) log.warn({ failed }, "jobs.storage_collect_failed");
+}
+
+/**
+ * The reconciler (docs/image-management.md T7).
+ *
+ * The sweeper above collects objects whose rows were removed. This finds
+ * the ones no row ever recorded -- a crash between upload and insert, a
+ * multipart upload storage never finalised -- by listing the bucket and
+ * subtracting what the database still points at.
+ *
+ * It is also the only thing here capable of deleting every photograph in
+ * the store, running unattended against a bucket with no backup. Six
+ * rails, and the tests for them matter more than this code does.
+ */
+export interface StorageSurvey {
+  bucketObjects: number;
+  referenced: number;
+  /** Old enough to be considered at all -- rail 2. */
+  candidates: number;
+  /** Unreferenced, before the confirmation window is applied. */
+  orphans: string[];
+  /** Rows pointing at objects that are not in the bucket: broken images. */
+  brokenReferences: string[];
+  /** Non-null when a rail refused the pass. Nothing is removed. */
+  refused: string | null;
+}
+
+async function survey(db: ReturnType<typeof serviceClient>): Promise<StorageSurvey> {
+  const empty = (refused: string): StorageSurvey => ({
+    bucketObjects: 0,
+    referenced: 0,
+    candidates: 0,
+    orphans: [],
+    brokenReferences: [],
+    refused,
+  });
+
+  const refs = await db.rpc("referenced_objects");
+  if (refs.error) return empty(`reference query failed: ${refs.error.message}`);
+
+  const urls = ((refs.data ?? []) as { url: string }[]).map((r) => r.url);
+
+  // RAIL 4. Zero references is a broken query, not an empty catalog --
+  // and it is the single input that would mark every object in the
+  // bucket collectable. Refusing here is why the rest can be trusted.
+  if (urls.length === 0) {
+    return empty("referenced_objects() returned nothing, which is a broken query, not an empty catalog");
+  }
+
+  const referencedPaths = new Set(
+    urls.map((u) => pathFromUrl(u)).filter((p): p is string => p !== null),
+  );
+
+  const objects = await listObjects();
+  const inBucket = new Set(objects.map((o) => o.path));
+
+  // RAIL 2. An object uploaded seconds ago may not have a committed row
+  // yet. Considering it would mean racing the request that created it.
+  const cutoff = Date.now() - env.GC_MIN_AGE_HOURS * 3_600_000;
+  const candidates = objects.filter(
+    (o) => !o.createdAt || Date.parse(o.createdAt) < cutoff,
+  );
+
+  return {
+    bucketObjects: objects.length,
+    referenced: referencedPaths.size,
+    candidates: candidates.length,
+    orphans: candidates.filter((o) => !referencedPaths.has(o.path)).map((o) => o.path),
+    // Reported, never acted on. A row pointing at a missing object is a
+    // broken image on a live page -- more visible than an orphan and not
+    // fixable by deleting anything.
+    brokenReferences: [...referencedPaths].filter((p) => !inBucket.has(p)),
+    refused: null,
+  };
+}
+
+/** The report. Reads only -- no sighting is recorded by looking. */
+export async function surveyStorage(): Promise<StorageSurvey & { confirmed: string[] }> {
+  if (!storageConfigured()) {
+    return {
+      bucketObjects: 0,
+      referenced: 0,
+      candidates: 0,
+      orphans: [],
+      brokenReferences: [],
+      refused: "no bucket configured",
+      confirmed: [],
+    };
+  }
+  const db = serviceClient();
+  const found = await survey(db);
+  const seen = await db
+    .from("storage_orphan_sightings")
+    .select("path")
+    .lt("first_seen_at", new Date(Date.now() - env.GC_CONFIRM_DAYS * 86_400_000).toISOString());
+
+  return {
+    ...found,
+    confirmed: ((seen.data ?? []) as { path: string }[]).map((s) => s.path),
+  };
+}
+
+/**
+ * One pass. Records what it sees; removes only what has been seen before.
+ */
+export async function reconcileStorage(
+  apply: boolean,
+  /**
+   * Overrides for the two rails whose defaults are measured in days and
+   * hundreds. Not a feature -- a rail that cannot be exercised is a rail
+   * somebody deletes as dead code, and these two are exactly the ones
+   * that would otherwise need a week and a real catalog to trip.
+   * Production passes nothing.
+   */
+  opts: { maxDelete?: number; confirmDays?: number } = {},
+): Promise<StorageSurvey & { confirmed: string[]; collected: number; applied: boolean }> {
+  const maxDelete = opts.maxDelete ?? env.GC_MAX_DELETE;
+  const confirmDays = opts.confirmDays ?? env.GC_CONFIRM_DAYS;
+  const nothing = (s: StorageSurvey) => ({ ...s, confirmed: [], collected: 0, applied: false });
+
+  if (!storageConfigured()) {
+    return nothing({
+      bucketObjects: 0,
+      referenced: 0,
+      candidates: 0,
+      orphans: [],
+      brokenReferences: [],
+      refused: "no bucket configured",
+    });
+  }
+
+  const db = serviceClient();
+  const found = await survey(db);
+  if (found.refused) {
+    log.error({ refused: found.refused }, "ops.storage_reconcile_refused");
+    await alert(
+      db,
+      "ops_storage_reconcile_refused",
+      "Image collection refused to run",
+      `The pass was abandoned and nothing was removed: ${found.refused}. That is the safe outcome, but it means orphaned images are accumulating until it is fixed.`,
+      { refused: found.refused },
+    );
+    return nothing(found);
+  }
+
+  // RAIL 1. Record this pass and get back only what was already looking
+  // orphaned a confirmation window ago. Anything this pass did NOT see
+  // is forgotten inside the same statement, so a path that came back
+  // starts its week again.
+  const sighted = await db.rpc("record_orphan_sightings", {
+    p_paths: found.orphans,
+    p_confirm: `${confirmDays} days`,
+  });
+  if (sighted.error) {
+    log.error({ err: sighted.error.message }, "jobs.storage_sightings_failed");
+    return nothing({ ...found, refused: `sightings failed: ${sighted.error.message}` });
+  }
+  const confirmed = ((sighted.data ?? []) as { path: string }[]).map((s) => s.path);
+
+  // RAIL 3. Refuse the whole pass, not the first hundred of it. A set
+  // this large means the reference query is wrong in a way rail 4 did
+  // not catch, and collecting "only" a hundred photographs is not a
+  // safer version of that.
+  if (confirmed.length > maxDelete) {
+    const refused = `${confirmed.length} objects confirmed, above GC_MAX_DELETE of ${maxDelete}`;
+    log.error({ confirmed: confirmed.length }, "ops.storage_reconcile_refused");
+    await alert(
+      db,
+      "ops_storage_reconcile_refused",
+      "Image collection refused: too many at once",
+      `${refused}. Nothing was removed. This is what a broken reference query looks like from here -- check referenced_objects() before raising the limit.`,
+      { confirmed: confirmed.length, cap: maxDelete },
+    );
+    return { ...found, confirmed, collected: 0, applied: false, refused };
+  }
+
+  if (!apply || confirmed.length === 0) {
+    return { ...found, confirmed, collected: 0, applied: false };
+  }
+
+  // RAIL 5. Every path, before anything happens to it. With no bucket
+  // backup this log line is the only record the object ever existed.
+  log.info({ paths: confirmed }, "storage.collecting");
+
+  const removed: string[] = [];
+  for (const path of confirmed) {
+    try {
+      if ((await deleteObject(path)).gone) removed.push(path);
+    } catch (err) {
+      log.warn({ path, err: (err as Error).message }, "storage.collect_failed");
+    }
+  }
+
+  // Only what actually went. A failed one keeps its sighting and its
+  // original first_seen_at, so it is retried next pass rather than
+  // starting its week over.
+  if (removed.length > 0) {
+    await db.rpc("forget_orphan_sightings", { p_paths: removed });
+    log.warn({ collected: removed.length }, "ops.storage_reconciled");
+    await alert(
+      db,
+      "ops_storage_reconciled",
+      "Unreferenced images were removed",
+      `${removed.length} object(s) that nothing has pointed at for ${confirmDays} days were removed from the bucket. There is no backup, so this is permanent; the paths are in the logs under storage.collecting.`,
+      { collected: removed.length },
+    );
+  }
+
+  return { ...found, confirmed, collected: removed.length, applied: true };
 }
 
 /**

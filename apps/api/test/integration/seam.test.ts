@@ -2261,6 +2261,8 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let storage: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let jobs: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let app: any;
   const STAFF_ID = "bbbbbbbb-0000-4000-8000-000000000001";
 
@@ -2268,6 +2270,7 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     const kong = startKongStandIn();
     await configureEnv(kong.url);
     storage = await import("../../src/storage");
+    jobs = await import("../../src/jobs");
     ({ app } = await import("../../src/app"));
 
     await sql(`
@@ -2333,6 +2336,117 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     );
 
     await sql(`delete from products where id in ('${MINE}', '${OTHER}')`);
+  });
+
+  test("rail 1: an orphan seen once is not collected", async () => {
+    // The rail that replaces the human. Everything the bucket holds is
+    // unreferenced in this fixture, so a reconciler without a
+    // confirmation window would remove all of it on the first pass.
+    await sql("delete from storage_orphan_sightings");
+    const first = await jobs.reconcileStorage(true);
+    expect(first.orphans.length).toBeGreaterThan(0);
+    expect(first.confirmed).toEqual([]);
+    expect(first.collected).toBe(0);
+
+    // Recorded, though -- that is what makes the second pass possible.
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe(
+      String(first.orphans.length),
+    );
+  });
+
+  test("rail 1: a path that stops looking orphaned forgets its week", async () => {
+    // The failure this exists for: referenced_objects() returning too
+    // little -- a migration mid-flight, a revoked grant -- makes real
+    // images look unreferenced. One pass records them; the next, with
+    // the query working, must clear them rather than collect them.
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+        values ('products/p1/kept.jpg', now() - interval '30 days');
+    `);
+
+    // Reference it again, exactly as a working query would.
+    const PROD = "11111111-0000-4000-8000-00000000ff09";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-rail1', 'Rail1', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', '${STORAGE_PUBLIC_URL}/products/p1/kept.jpg', 0);
+    `);
+
+    const pass = await jobs.reconcileStorage(true);
+    expect(pass.confirmed).not.toContain("products/p1/kept.jpg");
+    // Forgotten, not merely skipped: its clock restarts from zero.
+    expect(
+      await sqlValue(
+        "select count(*) from storage_orphan_sightings where path = 'products/p1/kept.jpg'",
+      ),
+    ).toBe("0");
+
+    await sql(`delete from products where id = '${PROD}'`);
+  });
+
+  test("rail 3: too many at once refuses the whole pass, not the first hundred", async () => {
+    // A set this large means the reference query is wrong. Collecting
+    // "only" the cap is not a safer version of that -- it is the same
+    // accident, smaller, and still permanent.
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select 'products/p1/bulk-' || g || '.jpg', now() - interval '30 days'
+      from generate_series(1, 200) g;
+    `);
+    // Those paths are not in the bucket, so this pass would forget them.
+    // Point the survey at the real ones instead by confirming everything
+    // the bucket holds.
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select unnest(array['products/p1/kept.jpg','products/p1/orphan.jpg','products/p2/deep.jpg']),
+             now() - interval '30 days';
+    `);
+
+    const capped = await jobs.reconcileStorage(true, { maxDelete: 2 });
+    expect(capped.refused).toContain("above GC_MAX_DELETE");
+    expect(capped.collected).toBe(0);
+    expect(capped.applied).toBe(false);
+    // Still there. A refused pass must not quietly remove some of it.
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("3");
+  });
+
+  test("rail 6: a dry pass records but removes nothing", async () => {
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select unnest(array['products/p1/kept.jpg','products/p1/orphan.jpg','products/p2/deep.jpg']),
+             now() - interval '30 days';
+    `);
+    const dry = await jobs.reconcileStorage(false);
+    expect(dry.confirmed.length).toBe(3);
+    expect(dry.collected).toBe(0);
+    expect(dry.applied).toBe(false);
+  });
+
+  test("a confirmed orphan is collected, and only then forgotten", async () => {
+    await sql(`
+      delete from storage_orphan_sightings;
+      insert into storage_orphan_sightings (path, first_seen_at)
+      select unnest(array['products/p1/kept.jpg','products/p1/orphan.jpg','products/p2/deep.jpg']),
+             now() - interval '30 days';
+    `);
+    const applied = await jobs.reconcileStorage(true);
+    expect(applied.applied).toBe(true);
+    expect(applied.collected).toBe(3);
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("0");
+  });
+
+  test("the report reads without recording anything", async () => {
+    // A GET that recorded sightings would let anyone refreshing an admin
+    // page advance objects towards deletion.
+    await sql("delete from storage_orphan_sightings");
+    const report = await jobs.surveyStorage();
+    expect(report.orphans.length).toBeGreaterThan(0);
+    expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("0");
   });
 
   test("listing the bucket recurses into folders", async () => {

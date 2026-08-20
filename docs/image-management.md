@@ -268,7 +268,16 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
   - *Acceptance*: **met.** The stand-in models the folder behaviour rather than returning
     keys flat, so a non-recursive walk fails the test instead of passing it
 
-- [ ] **T7. The reconciler, two-pass** — migration + `apps/api/src/routes/jobs.ts`
+- [x] **T7. The reconciler, two-pass** — **done**,
+  `supabase/migrations/20260801003200_orphan_sightings.sql` + `apps/api/src/jobs.ts` +
+  `apps/api/src/routes/jobs.ts`
+  - **`reconcileStorage()` takes rail overrides**, and that is not a convenience. Rails
+    measured in days and hundreds cannot otherwise be exercised without a week and a real
+    catalog, and a rail nobody can test is a rail somebody removes as dead code
+  - **The bug worth remembering**: `RETURNS TABLE (path, ...)` puts `path` in scope for
+    the whole body, so `on conflict (path)` was ambiguous between the output variable and
+    the column. `#variable_conflict use_column`. It failed loudly rather than silently,
+    which is the only reason it was cheap
   - `storage_orphan_sightings`: `path text pk`, `first_seen_at timestamptz`,
     `last_seen_at timestamptz`. A pass upserts every orphan it finds and **deletes the
     sighting for any path that is no longer orphaned** — a path that came back must start
