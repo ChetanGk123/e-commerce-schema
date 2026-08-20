@@ -312,7 +312,14 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
   - *Acceptance*: a scheduled pass deletes a confirmed orphan with no human involved, and
     says so
 
-- [ ] **T9. Prove every rail fires** — `apps/api/test/integration/seam.test.ts`
+- [x] **T9. Prove every rail fires** — **done**, `apps/api/test/integration/seam.test.ts`
+  - Rails 1, 2, 3, 4 and 6 each have a test. **Rail 5 (log every path before removing it)
+    has none** and that is deliberate: asserting on a log line pins the logger, not the
+    behaviour, and the line is visible in every applied pass
+  - **Rail 4's test does not simulate the failure with a flag.** It renames
+    `referenced_objects()` aside and puts an empty one in its place — which is what a
+    migration mid-flight or a revoked grant actually does — then restores it and proves the
+    real one is feeding the diff again, not merely that the pass stopped refusing
   - One test per rail: an unconfirmed orphan survives its first pass; a young object is
     skipped; an over-cap set refuses **entirely** rather than partially; an empty reference
     set aborts; a dry run deletes nothing
@@ -367,7 +374,12 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
 
 ### Phase 4 — worth doing, not worth doing first
 
-- [ ] **T13. Presigned direct upload.** Today `await file.arrayBuffer()` buffers the whole
+- [x] **T13. Upload memory — decided: cap it rather than go direct.** `MAX_IMAGE_KB` is
+  1024, not 5120. Presigned uploads remove the buffering entirely but put R2 credentials in
+  this process, reversing a deliberate decision, and admin uploads are rare and
+  low-concurrency. Capping is the cheaper half of the same trade, and only affordable
+  because T14 derives sizes at the edge. *Original wording:*
+- [ ] ~~**T13. Presigned direct upload.**~~ Today `await file.arrayBuffer()` buffers the whole
   image in the API process — at `MAX_IMAGE_KB=5120`, ten concurrent uploads is 50MB
   resident. A presigned PUT removes that entirely, at the cost of SigV4 signing here and R2
   credentials living in this process. It also creates case-4 orphans by design, which is why

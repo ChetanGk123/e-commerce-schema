@@ -2524,6 +2524,69 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("3");
   });
 
+  test("rail 2: an object uploaded moments ago is not considered", async () => {
+    // The reconciler must not race the request that created the object.
+    // A row committed a second after the listing would otherwise look
+    // like an orphan on the very pass that saw the upload.
+    await sql("delete from storage_orphan_sightings");
+    const pass = await jobs.reconcileStorage(false);
+    expect(pass.orphans).not.toContain("products/p3/fresh.jpg");
+    // ...while the old ones are considered, so this is the age threshold
+    // and not the listing quietly missing a file.
+    expect(pass.orphans).toContain("products/p1/orphan.jpg");
+    expect(pass.bucketObjects).toBeGreaterThan(pass.candidates);
+  });
+
+  test("rail 4: a reference query returning nothing refuses the pass", async () => {
+    // The one that matters most, and the reason is arithmetic: an empty
+    // reference set makes every object in the bucket look unreferenced.
+    // This does not simulate it with a flag -- it breaks the real
+    // function the way a migration mid-flight or a revoked grant would,
+    // by making it return too little.
+    await sql(`
+      delete from storage_orphan_sightings;
+      alter function referenced_objects() rename to referenced_objects_real;
+      create function referenced_objects() returns table (url text)
+        language sql stable security definer set search_path = public, pg_temp
+        as $q$ select null::text where false $q$;
+    `);
+
+    try {
+      const pass = await jobs.reconcileStorage(true);
+      expect(pass.refused).toContain("broken query");
+      expect(pass.collected).toBe(0);
+      // And nothing was recorded, so the outage cannot age objects
+      // towards collection while it lasts.
+      expect(await sqlValue("select count(*) from storage_orphan_sightings")).toBe("0");
+    } finally {
+      await sql(`
+        drop function referenced_objects();
+        alter function referenced_objects_real() rename to referenced_objects;
+      `);
+    }
+
+    // Working again -- and proved by the function actually feeding the
+    // diff, not just by the pass not refusing. `referenced` counts URLs
+    // that resolve to our own bucket, so it needs a row pointing at one
+    // of the keys the stand-in holds.
+    const PROD = "11111111-0000-4000-8000-00000000ff0c";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-rail4', 'Rail4', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', '${STORAGE_PUBLIC_URL}/products/p1/kept.jpg', 0);
+    `);
+
+    const after = await jobs.reconcileStorage(false);
+    expect(after.refused).toBeNull();
+    expect(after.referenced).toBe(1);
+    // The referenced one is no longer an orphan; the others still are.
+    expect(after.orphans).not.toContain("products/p1/kept.jpg");
+    expect(after.orphans).toContain("products/p1/orphan.jpg");
+
+    await sql(`delete from products where id = '${PROD}'; delete from storage_gc_queue;`);
+  });
+
   test("rail 6: a dry pass records but removes nothing", async () => {
     await sql(`
       delete from storage_orphan_sightings;

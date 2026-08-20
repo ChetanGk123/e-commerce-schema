@@ -121,7 +121,15 @@ export function startKongStandIn(): { url: string; stop: () => void } {
           const rest = key.slice(at.length);
           const slash = rest.indexOf("/");
           if (slash === -1) {
-            entries.push({ name: rest, id: `id-${key}`, created_at: BUCKET_CREATED_AT });
+            entries.push({
+              name: rest,
+              id: `id-${key}`,
+              // "fresh" is dated now, everything else long ago, so a test
+              // can tell the age threshold from the orphan check.
+              created_at: key.includes("fresh")
+                ? new Date().toISOString()
+                : BUCKET_CREATED_AT,
+            });
           } else if (!seen.has(rest.slice(0, slash))) {
             seen.add(rest.slice(0, slash));
             entries.push({ name: rest.slice(0, slash), id: null, created_at: null });
@@ -174,6 +182,9 @@ export const BUCKET_KEYS = [
   "products/p1/kept.jpg",
   "products/p1/orphan.jpg",
   "products/p2/deep.jpg",
+  // Uploaded moments ago, so the age threshold must skip it. Named so
+  // the stand-in can date it differently.
+  "products/p3/fresh.jpg",
 ];
 
 /** Old enough to clear any age threshold a test does not want to fight. */
