@@ -48,7 +48,17 @@ export async function requireStaff(): Promise<Staff> {
   return staff;
 }
 
-/** For a page only some roles may see. */
+/**
+ * For a page only some roles may see.
+ *
+ * TESTING NOTE, because it wasted a round here. A redirect from a LAYOUT
+ * arrives as an HTTP 307; a redirect from a PAGE usually does not. By the
+ * time a page component runs, the shell has begun streaming and the status
+ * line is already sent -- so Next embeds a client-side navigation and the
+ * response is 200. Asserting on the status code will tell you the gate is
+ * broken when it is not. Assert on the BODY: the forbidden data must be
+ * absent and /unauthorized present.
+ */
 export async function requireRole(roles: readonly StaffRole[]): Promise<Staff> {
   const staff = await requireStaff();
   if (!roles.includes(staff.role)) redirect("/unauthorized");

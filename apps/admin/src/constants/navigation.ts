@@ -1,4 +1,4 @@
-import { LayoutDashboard, Settings, Users } from "lucide-react";
+import { Contact, LayoutDashboard, Settings, Users } from "lucide-react";
 
 import type { NavGroup, NavMainLinkItem } from "@/types";
 
@@ -17,6 +17,17 @@ export const sidebarItems: NavGroup[] = [
         title: "Users",
         url: "/dashboard/users",
         icon: Users,
+      },
+      {
+        id: "customers",
+        title: "Customers",
+        url: "/dashboard/customers",
+        icon: Contact,
+        // warehouse is absent deliberately: that role sees no PII beyond a
+        // shipping address, per the role map in docs/admin-plan.md. The page
+        // enforces the same list -- this only avoids offering a door that
+        // will not open.
+        roles: ["owner", "admin", "manager", "support"],
       },
     ],
   },

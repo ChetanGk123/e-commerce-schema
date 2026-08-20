@@ -5,7 +5,7 @@ storefront. Tick boxes as work lands, update **Status** and the Progress table a
 bottom. Anything discovered mid-build that contradicts this file: fix the file, don't work
 around it.
 
-**Status**: `Phases 0-1 done -- sign in, role-gated shell, no Supabase client. Phase 2 next`
+**Status**: `Phases 0-2 done -- the customers list proves the read pattern. Phase 4 (Orders) next`
 **Created**: 2026-08-17
 **Revised**: 2026-08-20 -- the shell now comes from a template rather than `bun create next-app`
 **Complexity**: Large (~3 weeks to a usable console)
@@ -223,11 +223,11 @@ repo and becomes a workspace member with no leftovers.
 
 ## Phase 2 — Data layer conventions · Low
 
-- [ ] Server Components call the API · Server Actions call the API · `revalidatePath` after
-- [ ] List state in URL search params (page / sort / filters / q), forwarded as query params
-- [ ] Render the API's error envelope (api-plan B2 owns the constraint→copy mapping — do **not** reimplement it here)
-- [ ] Money `Intl.NumberFormat('en-IN', {currency:'INR'})`; dates `Asia/Kolkata`
-- [ ] **Validate**: customers list end-to-end proves the pattern before it's copied nine times
+- [x] Server Components call the API · Server Actions call the API · `revalidatePath` after
+- [x] List state in URL search params (page / sort / filters / q), forwarded as query params
+- [x] Render the API's error envelope (api-plan B2 owns the constraint→copy mapping — do **not** reimplement it here)
+- [x] Money `Intl.NumberFormat('en-IN', {currency:'INR'})`; dates `Asia/Kolkata`
+- [x] **Validate**: customers list end-to-end proves the pattern before it's copied nine times
 
 ## Phase 3 — *moved*
 
@@ -369,7 +369,7 @@ a store you can operate.
 |---|---|---|
 | 0 Workspace scaffold | **done** | template vendored to `apps/admin`; zod v3, `@ecom/schema` wired, Dockerfile + compose, hot reload verified |
 | 1 Auth & shell | **done** | httpOnly `sb-admin` cookie, `proxy.ts`, `/me`-backed `getStaff()`, role-filtered nav |
-| 2 Data layer | not started | |
+| 2 Data layer | **done** | URL-as-state, API error envelope, en-IN money + Asia/Kolkata dates, token refresh; customers list is the worked example |
 | 3 ~~RPC migration~~ | moved | now api-plan **B3** |
 | 4 Orders | not started | |
 | 5 Catalog | not started | |
