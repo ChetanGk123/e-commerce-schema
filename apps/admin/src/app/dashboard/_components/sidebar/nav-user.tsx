@@ -2,7 +2,7 @@
 
 import { EllipsisVertical, LogOut } from "lucide-react";
 
-import { signOut } from "@/app/(auth)/_actions/sign-out";
+import { signOut } from "@/lib/actions/sign-out";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,

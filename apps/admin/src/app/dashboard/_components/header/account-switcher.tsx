@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn, getInitials } from "@/lib/utils"
-import { signOut } from "@/app/(auth)/_actions/sign-out"
+import { signOut } from "@/lib/actions/sign-out"
 
 export function AccountSwitcher({
   users,
