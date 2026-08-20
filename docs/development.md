@@ -1,10 +1,11 @@
-# Running the whole thing locally
+# Running it locally
 
-One command brings up 19 containers: self-hosted Supabase, the API with
-hot reload, and the monitoring stack.
+**Two compose projects.** Supabase is infrastructure this repo targets,
+not something it contains, so you start it yourself:
 
 ```sh
-docker compose up -d
+cd "$SUPABASE_DIR" && docker compose up -d     # 13 containers
+cd - && docker compose up -d                   # 6 containers: api + monitoring
 ```
 
 Every step below ends with a check. Run it.
@@ -15,23 +16,28 @@ Every step below ends with a check. Run it.
 
 ---
 
-## What starts, and what owns it
+## What runs where
 
-| | Where it is defined |
-|---|---|
-| **Supabase**, 13 containers | `${SUPABASE_COMPOSE_DIR}` — **not in this repo** |
-| **api**, hot reload | `apps/api/Dockerfile`, `dev` stage |
-| **monitoring**, 5 containers | `monitoring/docker-compose.yml` |
+| | Project | Defined in |
+|---|---|---|
+| **Supabase**, 13 containers | `supabase` | `ChetanGk123/dokploy-templates` — **not this repo** |
+| **api**, hot reload | `ecom` | `apps/api/Dockerfile`, `dev` stage |
+| **monitoring**, 5 containers | `ecom` | `monitoring/docker-compose.yml` |
 
-The root `docker-compose.yml` owns only the `api` service and `include`s
-the other two. Neither belongs here: the Supabase compose is
-`ChetanGk123/dokploy-templates` and is deliberately kept byte-identical to
-it, and the monitoring compose has to keep working on its own on a Dokploy
-host beside an API this file knows nothing about.
+Supabase stays out because the template is deliberately kept
+byte-identical to `dokploy-templates`; vendoring it here makes this repo a
+fork to reconcile on every Supabase bump. In production Dokploy runs it,
+not this file, so keeping the split matches how it actually deploys.
 
-`include` puts all three in **one** Compose project, so every service
-reaches every other by service name. That is why the API is configured
-with `kong:8000` rather than `localhost:8000`.
+**`dokploy-network` is the whole connection between the two.** The
+template puts kong on it — that is what it is for, Traefik reaches kong
+the same way — so the API resolves `kong:8000` across the project boundary
+with neither side configured for the other. Nothing else in Supabase is on
+that network, and nothing else needs to be: the API only ever talks to
+Supabase through kong.
+
+`monitoring/docker-compose.yml` is `include`d rather than copied, because
+it still has to run standalone on a host where this file does not exist.
 
 Only `apps/api` has a Dockerfile, because it is the only workspace that
 runs. `packages/schema` and `packages/client` are libraries — no start
@@ -39,27 +45,20 @@ script, nothing to execute.
 
 ---
 
-## Step 1. Point at your Supabase
+## Step 1. Config
 
 ```sh
 cp .env.example .env
 ```
 
-Set `SUPABASE_COMPOSE_DIR` to wherever your Supabase compose lives.
+Nothing in it is secret except `METRICS_TOKEN`, which the next step
+writes.
 
-**That directory is also where your database physically is.** The template
-bind-mounts `files/volumes/db/data` for Postgres, so the path you choose
-holds the actual data files. Put it somewhere durable — a temp directory
-will be reaped and take the database with it.
-
-**Check:**
-
-```sh
-ls "$(grep SUPABASE_COMPOSE_DIR .env | cut -d= -f2)"/docker-compose.yml
-```
-
-Expect the file to exist. If `SUPABASE_COMPOSE_DIR` is unset, Compose
-refuses to start and says so by name.
+A note on wherever you keep the Supabase compose: **that directory is also
+where your database physically is.** The template bind-mounts
+`files/volumes/db/data` for Postgres, so the path holds the actual data
+files. Keep it somewhere durable — a temp directory will be reaped and
+take the database with it.
 
 ---
 
@@ -109,14 +108,39 @@ the missing network.
 
 ---
 
-## Step 4. Up
+## Step 4. Start Supabase
+
+In its own directory, its own project:
+
+```sh
+cd /path/to/supabase-local/code && docker compose up -d
+```
+
+**Give it two or three minutes.** `analytics` (Logflare) runs Ecto
+migrations on boot and is the slow one, and `kong`, `studio` and
+`functions` all wait on its healthcheck — so a stack that looks stuck with
+three containers in `Created` is usually just Logflare still starting.
+
+**Check:**
+
+```sh
+docker ps --filter name=supabase --format '{{.Names}}\t{{.Status}}'
+```
+
+Expect **13 containers**, with `kong` and `db` **healthy**. If several are
+`Restarting` and their logs say `lookup db ... no such host`, see
+[Troubleshooting](#troubleshooting).
+
+---
+
+## Step 5. Start this repo
 
 ```sh
 docker compose up -d
 ```
 
-First run builds the API dev image and pulls ~19 images; allow a few
-minutes. After that it is seconds.
+First run builds the API dev image and pulls the monitoring images; allow
+a few minutes. After that it is seconds.
 
 **Check:**
 
@@ -124,10 +148,13 @@ minutes. After that it is seconds.
 docker compose ps --format '{{.Service}}\t{{.State}}'
 ```
 
-Expect **19 services, all `running`**.
+Expect **6 services, all `running`** — `api` plus the five monitoring
+containers.
 
-The API waits for Kong's healthcheck before starting — `env.ts` validates
-at import, so an API that raced Supabase would just exit.
+There is no `depends_on` on kong, because Compose can only wait on
+services in its own project. `env.ts` validates at import, so an API
+started before Supabase is up exits rather than limping — `restart:
+unless-stopped` turns that into a retry until Supabase answers.
 
 **Check** the whole path, API through Kong to Postgres and back:
 
@@ -183,8 +210,9 @@ docker compose down     # removes containers, keeps the database
 ```
 
 `down` is safe. Postgres data is a **bind mount** under
-`$SUPABASE_COMPOSE_DIR/../files/volumes/db/data`, not a Compose volume, so
-it survives.
+`files/volumes/db/data` beside the Supabase compose, not a Compose volume,
+so it survives. And `down` here does not touch Supabase at all — it is a
+separate project.
 
 **`docker compose down -v` is not safe** — it destroys named volumes,
 including Grafana's, taking any dashboard you built in the UI with it. It
@@ -194,11 +222,25 @@ does not touch the Postgres bind mount.
 
 ## Troubleshooting
 
-**`required variable SUPABASE_COMPOSE_DIR is missing a value`** — no
-`.env`, or the variable is empty. Step 1.
-
 **`network dokploy-network declared as external, but could not be found`**
-— Step 3.
+— Step 3. Both projects need it and neither creates it.
+
+**Supabase containers restarting, logs say `lookup db ... no such host`.**
+Their network was removed while they still existed, so they are attached
+to one that is gone and DNS resolves nothing. `up` alone will not fix it —
+Compose reuses the containers. Recreate them:
+
+```sh
+docker compose up -d --force-recreate
+```
+
+Safe: Postgres data is a bind mount, not a Compose volume.
+
+**Port 54322 or 8000 already allocated when starting Supabase.** An older
+copy of those containers is still running — most likely from a compose
+project you have since stopped using. `docker ps -a | grep -E 'kong|db'`
+will find them; `docker compose down --remove-orphans` in the project that
+created them clears it.
 
 **The `api` container exits immediately.** `env.ts` validates at import and
 refuses to boot on bad config; the log names the variable:

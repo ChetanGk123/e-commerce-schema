@@ -1,40 +1,29 @@
-# Everything, in one command.
+# What this repo runs: the API, and the monitoring that watches it.
 #
 #   docker compose up -d
 #
-# Brings up self-hosted Supabase (13 containers), the API with hot reload,
-# and the monitoring stack. See docs/development.md.
+# SUPABASE IS NOT HERE, deliberately. It is infrastructure this repo
+# targets, not something it contains -- ChetanGk123/dokploy-templates owns
+# that compose, and its own override file says the template is kept
+# byte-identical. Pulling it in would make this repo a fork to reconcile on
+# every Supabase bump, and in production it is Dokploy that runs it, not
+# this file.
 #
-# WHAT THIS FILE OWNS is only the `api` service. Supabase and monitoring
-# are `include`d from where they already live, because neither should be
-# copied here:
+# So Supabase is a PREREQUISITE: start it first, in its own project, and it
+# must be on the same external network named below. docs/development.md has
+# the sequence.
 #
-#   Supabase is ChetanGk123/dokploy-templates, and its override file says
-#   in as many words that docker-compose.yml is kept byte-identical to the
-#   template. A copy in this repo is a fork to reconcile on every Supabase
-#   bump, and it would go stale silently.
+# The link between the two is `dokploy-network`. The template puts kong on
+# it -- that is what it is for, Traefik reaches kong the same way -- so the
+# API resolves `kong:8000` across the project boundary without either side
+# knowing about the other. It is also exactly how the two meet on Dokploy.
 #
-#   monitoring/docker-compose.yml still has to work on its own -- on a
-#   Dokploy host it runs beside an API this file knows nothing about.
-#
-# `include` puts all three in ONE compose project, so every service reaches
-# every other by service name on the project's default network. That is why
-# the API says kong:8000 rather than localhost:8000, and why Prometheus's
-# api:3001 target resolves without any network configuration.
+# monitoring/docker-compose.yml is `include`d rather than copied, because it
+# still has to run standalone on a host where this file does not exist.
 
 name: ecom
 
 include:
-  # Both files: the template, then the local-ports override beside it.
-  # env_file is load-bearing -- Compose reads .env from the project
-  # directory (here), not from an included file's directory, so without
-  # this the ~30 ${POSTGRES_PASSWORD}-style variables the template needs
-  # would all interpolate empty.
-  - path:
-      - ${SUPABASE_COMPOSE_DIR:?set it in .env -- see .env.example}/docker-compose.yml
-      - ${SUPABASE_COMPOSE_DIR}/docker-compose.override.yml
-    env_file: ${SUPABASE_COMPOSE_DIR}/.env
-
   - path: monitoring/docker-compose.yml
 
 services:
@@ -103,12 +92,12 @@ services:
       - default
       - dokploy-network
 
-    depends_on:
-      kong:
-        # kong ships a healthcheck, so this waits for Supabase to actually
-        # answer rather than merely for the container to exist. env.ts
-        # validates at import and the API would otherwise race it.
-        condition: service_healthy
+    # No `depends_on: kong` any more -- kong belongs to another compose
+    # project and Compose can only wait on services in its own. env.ts
+    # validates at import, so an API started before Supabase is up exits
+    # rather than limping; `restart: unless-stopped` turns that into a
+    # retry instead of a dead container.
+    restart: unless-stopped
 
 networks:
   # Declared by the included Supabase compose too; repeated here because a

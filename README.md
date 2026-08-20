@@ -80,8 +80,8 @@ supabase/
   tests/
     00_shim.sql         fabricates auth.users / auth.uid() for local Postgres
     01_invariants.sql   87 assertions
-docker-compose.yml      everything at once — Supabase, the API with hot
-                        reload, monitoring. See docs/development.md
+docker-compose.yml      the API with hot reload, plus monitoring. Supabase
+                        runs separately — see docs/development.md
 monitoring/             Prometheus, Loki, Grafana — see docs/monitoring.md
 packages/
   schema/               @ecom/schema — TypeScript types, enums and zod

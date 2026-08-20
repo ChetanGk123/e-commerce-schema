@@ -8,7 +8,7 @@ trust. **Plans** record what was decided and how far it got — they carry a
 
 | File | What it answers |
 |---|---|
-| [development.md](development.md) | One `docker compose up -d` for all 19 containers — Supabase, the API with hot reload, and monitoring. Start here to work on the code. |
+| [development.md](development.md) | Running it locally: the API with hot reload plus monitoring via `docker compose up -d`, against a Supabase you start separately. Start here to work on the code. |
 | [setup.md](setup.md) | Empty project → a database you can build against, ~20 min. Part A hosted Supabase, Part B plain Postgres, Part C self-hosted. Every step ends in a check. |
 | [schema_guide.md](schema_guide.md) | Plain-English tour of all 51 tables and the flows that move between them. No technical background assumed. |
 | [image-management.md](image-management.md) | How images get into the store and how they leave — upload, and the deletion path that needed the storage GC. |
