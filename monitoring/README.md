@@ -33,7 +33,7 @@ cp .env.example .env && $EDITOR .env
 docker compose up -d
 ```
 
-Grafana is on `127.0.0.1:3000`, user `admin`. The dashboard is
+Grafana is on `127.0.0.1:3030` (`GRAFANA_PORT`), user `admin`. The dashboard is
 **E-commerce API**, provisioned — it appears on first start.
 
 **Put the settings in `.env`, not on the command line.** The `api` network

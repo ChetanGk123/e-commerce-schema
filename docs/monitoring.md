@@ -195,7 +195,10 @@ in that same output says which of the three causes it is.
 
 ### Step 6. Open Grafana
 
-<http://127.0.0.1:3000> — user `admin`, password from `.env`.
+<http://127.0.0.1:3030> — user `admin`, password from `.env`.
+
+Not Grafana's default 3000: that port belongs to `apps/admin`. Change it
+with `GRAFANA_PORT` in `.env`.
 
 **If it rejects the password**, it is almost certainly the one from the
 *first* start. `GF_SECURITY_ADMIN_PASSWORD` is read only when Grafana

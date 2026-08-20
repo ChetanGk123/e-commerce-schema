@@ -79,7 +79,13 @@ services:
     ports:
       # Localhost only. On Dokploy, drop this and use a Traefik label
       # instead -- the same pattern the Supabase template uses for kong.
-      - "127.0.0.1:3000:3000"
+      #
+      # 3030, not Grafana's default 3000: this repo's app ports are spoken
+      # for -- 3000 admin, 3001 api, 3002 store, as apps/api/.env.example's
+      # CORS_ORIGINS already assumes. Only the HOST side moves; Grafana
+      # still listens on 3000 inside the container, so nothing in its own
+      # config changes.
+      - "127.0.0.1:${GRAFANA_PORT:-3030}:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/etc/grafana/dashboards:ro
