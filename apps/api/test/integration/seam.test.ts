@@ -1994,3 +1994,122 @@ describe.skipIf(!up)("an account can be locked, and only by real failures", () =
     expect(await res.json()).toEqual([]);
   });
 });
+
+/**
+ * Image garbage collection, layer 1 (docs/image-management.md T1).
+ *
+ * The premise the whole design rests on: product_images has two ON
+ * DELETE CASCADE foreign keys, so image rows disappear without the API
+ * ever seeing it. If a cascade did not fire a statement-level trigger
+ * with a transition table, none of this would work and the objects would
+ * be orphaned in silence -- so that is the first thing asserted here.
+ */
+describe.skipIf(!up)("deleted images queue their objects", () => {
+  const PRODUCT = "11111111-0000-4000-8000-00000000ff01";
+  const VARIANT = "11111111-0000-4000-8000-00000000ff02";
+
+  const queued = async () =>
+    (
+      await sqlValue(
+        "select coalesce(string_agg(url, ',' order by url), '') from storage_gc_queue",
+      )
+    )
+      .split(",")
+      .filter(Boolean);
+
+  test("a cascading product delete queues every one of its images", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-cascade', 'GC Cascade', 'active');
+      insert into product_images (product_id, url, position) values
+        ('${PRODUCT}', 'https://img.test/a.jpg', 0),
+        ('${PRODUCT}', 'https://img.test/b.jpg', 1),
+        ('${PRODUCT}', 'https://img.test/c.jpg', 2);
+    `);
+    expect(await queued()).toEqual([]);
+
+    // The delete the API cannot see. One statement, three image rows.
+    await sql(`delete from products where id = '${PRODUCT}'`);
+
+    expect(await queued()).toEqual([
+      "https://img.test/a.jpg",
+      "https://img.test/b.jpg",
+      "https://img.test/c.jpg",
+    ]);
+  });
+
+  test("a cascading variant delete queues the variant's image too", async () => {
+    // The second foreign key, and the easier one to forget: deleting a
+    // colourway takes its photographs with it.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-variant', 'GC Variant', 'active');
+      insert into product_variants (id, product_id, sku, price, status)
+        values ('${VARIANT}', '${PRODUCT}', 'GC-SKU-1', 100, 'active');
+      insert into product_images (product_id, variant_id, url, position)
+        values ('${PRODUCT}', '${VARIANT}', 'https://img.test/variant.jpg', 0);
+    `);
+
+    await sql(`delete from product_variants where id = '${VARIANT}'`);
+    expect(await queued()).toEqual(["https://img.test/variant.jpg"]);
+
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("an object another row still displays is not queued", async () => {
+    // Nothing forbids two rows carrying one URL, and a hand-written
+    // insert in psql is how it happens. Queueing on the first delete
+    // would collect a photograph still on a live product page.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-shared', 'GC Shared', 'active');
+      insert into product_images (product_id, url, position) values
+        ('${PRODUCT}', 'https://img.test/shared.jpg', 0),
+        ('${PRODUCT}', 'https://img.test/shared.jpg', 1);
+    `);
+
+    await sql(`delete from product_images where product_id = '${PRODUCT}' and position = 0`);
+    expect(await queued()).toEqual([]);
+
+    // ...and queued once the last one goes.
+    await sql(`delete from product_images where product_id = '${PRODUCT}'`);
+    expect(await queued()).toEqual(["https://img.test/shared.jpg"]);
+
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("queueing the same object twice is one row, not two", async () => {
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PRODUCT}', 'gc-dupe', 'GC Dupe', 'active');
+      insert into product_images (product_id, url, position)
+        values ('${PRODUCT}', 'https://img.test/once.jpg', 0);
+    `);
+    await sql(`delete from product_images where product_id = '${PRODUCT}'`);
+
+    // Re-added and deleted again: the object still needs deleting once.
+    await sql(`
+      insert into product_images (product_id, url, position)
+        values ('${PRODUCT}', 'https://img.test/once.jpg', 0);
+      delete from product_images where product_id = '${PRODUCT}';
+    `);
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("1");
+
+    await sql(`delete from products where id = '${PRODUCT}'`);
+  });
+
+  test("a warehouse account cannot read the backlog", async () => {
+    // The same PII line drawn everywhere else: these URLs map the
+    // catalog, including products deleted before they ever launched.
+    const packer = "bbbbbbbb-0000-4000-8000-000000000009";
+    const res = await fetch(`${PGRST_URL}/storage_gc_queue?select=url`, {
+      headers: { Authorization: `Bearer ${await mintToken("authenticated", packer)}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+});

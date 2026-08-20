@@ -187,17 +187,22 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
 
 ### Phase 1 — stop making orphans nobody can find
 
-- [ ] **T1. `storage_gc_queue` and the trigger** — `supabase/migrations/20260801002900_storage_gc.sql`
+- [x] **T1. `storage_gc_queue` and the trigger** — **done**, `supabase/migrations/20260801002900_storage_gc.sql`
   - Table: `id uuid pk`, `path text not null unique`, `queued_at timestamptz default now()`,
     `attempts int default 0`, `last_error text`
   - `unique(path)` with `on conflict do nothing`: enqueueing the same path twice is one job
   - `AFTER DELETE ON product_images` — **statement-level with a transition table**, matching
     the pattern already used in this schema, because a cascade deletes many rows at once
-  - Path extraction lives in SQL, mirroring `pathFromUrl()`. A URL from outside our bucket
-    enqueues nothing
+  - ~~Path extraction lives in SQL, mirroring `pathFromUrl()`~~ — **changed while building.**
+    Which URLs are ours is decided by `STORAGE_PUBLIC_URL` and `STORAGE_BUCKET`, which are
+    environment, and the database has neither. Two parsers free to disagree means either
+    collecting somebody else's URL or leaking our own, so the trigger stores the **URL
+    verbatim** and the sweeper decides, using the one `pathFromUrl()` that already exists
   - RLS enabled and forced; staff read, no write policy; functions service_role only
-  - *Acceptance*: `delete from products where id = …` cascades twelve image rows and leaves
-    twelve queue rows
+  - *Acceptance*: **met.** Five tests in `seam.test.ts` — a product cascade queues all three
+    of its images, a variant cascade queues its own, a URL a second row still displays is
+    **not** queued, re-adding and re-removing stays one row, and a warehouse account cannot
+    read the backlog
 
 - [ ] **T2. `claim_storage_gc(p_limit)` and the sweeper** — migration + `apps/api/src/jobs.ts`
   - `FOR UPDATE SKIP LOCKED`, mirroring `claim_outbox`
