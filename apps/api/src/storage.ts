@@ -150,7 +150,12 @@ async function storage(
  * properties.
  */
 export async function uploadImage(
-  productId: string,
+  /**
+   * The folder to put it in -- `products/<id>` or `collections/<id>`.
+   * Supplied by the caller rather than built here, because "which kind
+   * of thing owns this image" is the route's knowledge, not storage's.
+   */
+  prefix: string,
   // Uint8Array<ArrayBuffer>, not bare Uint8Array: the default parameter is
   // ArrayBufferLike, which includes SharedArrayBuffer and is therefore not
   // a BlobPart. It comes from file.arrayBuffer(), so this is a narrowing
@@ -158,7 +163,7 @@ export async function uploadImage(
   bytes: Uint8Array<ArrayBuffer>,
   kind: { ext: string; mime: string },
 ): Promise<{ path: string; url: string }> {
-  const path = `products/${productId}/${crypto.randomUUID()}.${kind.ext}`;
+  const path = `${prefix}/${crypto.randomUUID()}.${kind.ext}`;
   const res = await storage("POST", path, {
     body: new Blob([bytes], { type: kind.mime }),
     contentType: kind.mime,

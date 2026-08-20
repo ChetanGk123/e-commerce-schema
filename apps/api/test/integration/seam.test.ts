@@ -2104,6 +2104,67 @@ describe.skipIf(!up)("deleted images queue their objects", () => {
     await sql(`delete from products where id = '${PRODUCT}'`);
   });
 
+  test("a URL a collection still displays is not queued", async () => {
+    // The bug T10 uncovered. collections.image_url has always been free
+    // text, and pasting a product's photograph into a collection's hero
+    // image is the obvious way to make the collection look like the
+    // thing it collects. Before 0034 the trigger asked only
+    // product_images, so removing the product image queued an object the
+    // collection was still showing -- a broken image on a live
+    // merchandising page, from a delete that looked unrelated.
+    const PROD = "11111111-0000-4000-8000-00000000ff0a";
+    const shared = `${STORAGE_PUBLIC_URL}/products/shared/hero.jpg`;
+    await sql(`
+      delete from storage_gc_queue;
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-shared-coll', 'Shared', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', '${shared}', 0);
+      insert into collections (name, slug, image_url, position)
+        values ('Hero', 'gc-hero', '${shared}', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+    `);
+
+    await sql(`delete from product_images where product_id = '${PROD}'`);
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("0");
+
+    // ...and queued once the collection lets go of it too.
+    await sql(`delete from collections where slug = 'gc-hero'`);
+    expect(await sqlValue("select url from storage_gc_queue")).toBe(shared);
+
+    await sql(`delete from products where id = '${PROD}'; delete from storage_gc_queue;`);
+  });
+
+  test("replacing a collection's image queues the old one", async () => {
+    const oldUrl = `${STORAGE_PUBLIC_URL}/collections/c1/old.jpg`;
+    const newUrl = `${STORAGE_PUBLIC_URL}/collections/c1/new.jpg`;
+    await sql(`
+      delete from storage_gc_queue;
+      insert into collections (name, slug, image_url, position)
+        values ('Swap', 'gc-swap', '${oldUrl}', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+      update collections set image_url = '${newUrl}' where slug = 'gc-swap';
+    `);
+    expect(await sqlValue("select url from storage_gc_queue")).toBe(oldUrl);
+
+    await sql(`delete from collections where slug = 'gc-swap'; delete from storage_gc_queue;`);
+  });
+
+  test("renaming a collection does not touch its image", async () => {
+    // The trigger fires on the column, not the row. A collection edited
+    // forty times keeps its picture.
+    await sql(`
+      delete from storage_gc_queue;
+      insert into collections (name, slug, image_url, position)
+        values ('Keep', 'gc-keep', '${STORAGE_PUBLIC_URL}/collections/c2/keep.jpg', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+      update collections set name = 'Renamed' where slug = 'gc-keep';
+    `);
+    expect(await sqlValue("select count(*) from storage_gc_queue")).toBe("0");
+
+    await sql(`delete from collections where slug = 'gc-keep'; delete from storage_gc_queue;`);
+  });
+
   test("a warehouse account cannot read the backlog", async () => {
     // The same PII line drawn everywhere else: these URLs map the
     // catalog, including products deleted before they ever launched.

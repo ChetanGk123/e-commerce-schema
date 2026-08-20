@@ -1080,7 +1080,7 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
       });
     }
 
-    const { url } = await uploadImage(id, bytes, kind);
+    const { url } = await uploadImage(`products/${id}`, bytes, kind);
 
     const position = Number(form.get("position") ?? 0);
     const altText = form.get("altText");

@@ -325,9 +325,23 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
 
 ### Phase 3 — the rest of the image surface
 
-- [ ] **T10. Collection images** — `POST /admin/collections/{id}/image`, same upload path.
-  `collections.image_url` is currently free text somebody can point anywhere, which works
-  and is invisible to the GC
+- [x] **T10. Collection images** — **done**,
+  `supabase/migrations/20260801003400_collection_images.sql` + `POST /admin/collections/{id}/image`
+  - **It uncovered a bug in T1 and T2.** Both asked "is any `product_images` row still
+    using this URL" before queueing an object, because `product_images` was the only table
+    holding image URLs when they were written. It never was: `collections.image_url` is
+    free text, and pasting a product's photograph into a collection's hero image is the
+    obvious way to make the collection look like the thing it collects. Removing the
+    product image then collected an object the collection still displayed — a broken image
+    on a live merchandising page, from a delete that looked unrelated. Both now ask
+    `referenced_objects()`, which is what 0031 exists for
+  - **`after update of image_url ... referencing old table` is illegal**: *transition
+    tables cannot be specified for triggers with column lists*. The transition table wins —
+    narrowing to a column was only an optimisation, and comparing old to new buys the same
+    saving. That needs both tables, which DELETE does not have, hence two functions
+  - `is distinct from`, not `<>`: clearing a picture to null is exactly the case that
+    orphans an object, and `<>` answers null there
+  - External URLs still work through `PATCH /admin/collections/{id}` and are untouched
 - [ ] **T11. Retire `invoices.pdf_url`** — decision 2 settled this by removing the feature:
   invoices are rendered as HTML and printed by the browser, so no PDF is ever stored. That
   leaves a column nothing writes and `routes/invoicing.ts` still reads and publishes as

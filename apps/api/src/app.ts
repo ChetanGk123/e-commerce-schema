@@ -117,6 +117,10 @@ app.use("*", (c, next) =>
  * no amount of validation downstream helps -- the allocation happens
  * first.
  */
+// Both image upload paths. Missing one means photographs rejected at
+// 256KB with a message about JSON.
+const IMAGE_UPLOAD =
+  /^\/admin\/(products\/[^/]+\/images|collections\/[^/]+\/image)$/;
 const jsonBodyLimit = bodyLimit({ maxSize: env.MAX_BODY_KB * 1024 });
 const imageBodyLimit = bodyLimit({ maxSize: env.MAX_IMAGE_KB * 1024 });
 
@@ -126,7 +130,7 @@ const imageBodyLimit = bodyLimit({ maxSize: env.MAX_IMAGE_KB * 1024 });
 // a single request making this process allocate until it dies, and that
 // argument does not stop applying just because one route needs more.
 app.use("*", (c, next) =>
-  c.req.method === "POST" && /^\/admin\/products\/[^/]+\/images$/.test(c.req.path)
+  c.req.method === "POST" && IMAGE_UPLOAD.test(c.req.path)
     ? imageBodyLimit(c, next)
     : jsonBodyLimit(c, next),
 );

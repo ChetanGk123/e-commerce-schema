@@ -5,6 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import { requireAuth, requireStaff } from "../auth";
 import { throwOnDbError } from "../errors";
 import { jsonError, validationHook } from "../schemas";
+import { sniffImageType, storageConfigured, uploadImage } from "../storage";
 
 /**
  * Categories and collections -- how a catalog is organised.
@@ -236,6 +237,55 @@ const setMembers = createRoute({
   },
 });
 
+/**
+ * A collection's hero image.
+ *
+ * `collections.image_url` was already writable as free text, and still
+ * is -- an externally hosted picture stays legal. What this adds is the
+ * managed path: upload the file, get it stored under the same bucket
+ * with the same sniffing and the same key rules as a product image.
+ *
+ * The picture it replaces is queued for collection by a trigger, not by
+ * this handler, because the trigger fires whether the change arrived
+ * here or through psql -- and psql is still how a lot of this store is
+ * administered.
+ */
+const uploadCollectionImage = createRoute({
+  method: "post",
+  path: "/admin/collections/{id}/image",
+  tags: ["admin", "catalog"],
+  summary: "Upload a collection's image",
+  description:
+    "multipart/form-data with a `file` part. Replaces whatever `imageUrl` held; the previous object is queued for collection automatically if nothing else points at it.\n\nThe type is read from the first bytes rather than the declared Content-Type, and the key is generated here -- an uploaded filename is an attacker's string.\n\nSetting `imageUrl` to an external URL through `PATCH /admin/collections/{id}` still works and is untouched by this.",
+  security: [{ bearerAuth: [] }],
+  middleware: [requireAuth, requireStaff] as const,
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "multipart/form-data": {
+          schema: z.object({
+            file: z.any().openapi({ type: "string", format: "binary" }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Stored, and the collection updated",
+      content: { "application/json": { schema: Collection } },
+    },
+    400: jsonError("No file part, or it was empty"),
+    401: jsonError("Missing or invalid token"),
+    403: jsonError("Not staff"),
+    404: jsonError("No such collection"),
+    413: jsonError("Larger than MAX_IMAGE_KB"),
+    415: jsonError("Not a JPEG, PNG, WebP or AVIF"),
+    503: jsonError("No image storage is configured"),
+  },
+});
+
 export const taxonomyRoute = new OpenAPIHono({ defaultHook: validationHook })
   .openapi(createCategory, async (c) => {
     const { data, error } = await c
@@ -322,4 +372,59 @@ export const taxonomyRoute = new OpenAPIHono({ defaultHook: validationHook })
 
     c.get("log")?.info({ id, count: product_ids.length }, "taxonomy.collection_set");
     return c.json({ collectionId: id, productIds: product_ids }, 200);
+  })
+
+  .openapi(uploadCollectionImage, async (c) => {
+    const { id } = c.req.valid("param");
+    const caller = c.get("caller");
+    if (!storageConfigured()) {
+      throw new HTTPException(503, {
+        message: "Image storage is not configured on this deployment.",
+        cause: { code: "storage_unconfigured" },
+      });
+    }
+
+    // Before spending an upload, exactly as the product route does.
+    const found = await caller.db.from("collections").select("id").eq("id", id).maybeSingle();
+    throwOnDbError(found.error);
+    if (!found.data) {
+      throw new HTTPException(404, {
+        message: "No such collection",
+        cause: { code: "not_found" },
+      });
+    }
+
+    const form = await c.req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      throw new HTTPException(400, {
+        message: "Attach an image as the `file` part.",
+        cause: { code: "no_file" },
+      });
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const kind = sniffImageType(bytes);
+    if (!kind) {
+      throw new HTTPException(415, {
+        message: "That is not a JPEG, PNG, WebP or AVIF.",
+        cause: { code: "unsupported_image" },
+      });
+    }
+
+    const { url } = await uploadImage(`collections/${id}`, bytes, kind);
+
+    // The previous picture is queued by the trigger in 0034, not here.
+    // The UPDATE that replaces image_url is the event, and it happens
+    // whether the change came through this route or through psql.
+    const { data, error } = await caller.db
+      .from("collections")
+      .update({ image_url: url })
+      .eq("id", id)
+      .select(COLLECTION_COLUMNS)
+      .single();
+    throwOnDbError(error);
+
+    c.get("log")?.info({ collectionId: id, url }, "taxonomy.collection_image");
+    return c.json(asCollection(data as unknown as CollectionRow), 200);
   });
