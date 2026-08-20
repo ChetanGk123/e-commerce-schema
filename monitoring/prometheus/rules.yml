@@ -1,0 +1,108 @@
+# Alert rules for the API.
+#
+# READ THIS BEFORE ADDING A GAUGE ALERT.
+#
+# metrics.ts publishes the ops gauges only when a jobs-tick snapshot
+# exists -- `if (ops)`. Before the first tick, and this is the whole
+# point, ecom_webhooks_exhausted DOES NOT EXIST as a series. It does not
+# read zero; there is nothing there. `ecom_webhooks_exhausted > 0` is
+# therefore silent in exactly the situation you most want it loud: the
+# tick is dead and nobody is computing the number.
+#
+# ecom_ops_snapshot_age_seconds is the one gauge published
+# unconditionally (-1 when nothing has published yet). It is the guard.
+# OpsSnapshotStale below must be treated as invalidating every OTHER
+# gauge alert in this file -- that is what the code comment means by
+# "Alert on that before trusting the rest".
+
+groups:
+  - name: ecom-api
+    rules:
+      # ----- liveness -------------------------------------------------
+      # `up` is synthesised by Prometheus per scrape. No blackbox
+      # exporter: a target that cannot be scraped is a target that is
+      # down, and that is one container we do not have to run.
+      - alert: ApiDown
+        expr: up{job="ecom-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "API is not scrapeable"
+          description: >-
+            Prometheus cannot reach {{ $labels.instance }}/metrics. Either
+            the process is gone or METRICS_TOKEN changed. This says nothing
+            about the public path through Traefik -- see the README.
+
+      # ----- the guard ------------------------------------------------
+      - alert: OpsSnapshotStale
+        # -1 means no tick has ever published. Both arms matter: the
+        # first catches a tick that stopped, the second a tick that never
+        # started, and the second is the one a fresh deploy produces.
+        expr: ecom_ops_snapshot_age_seconds > 300 or ecom_ops_snapshot_age_seconds == -1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Jobs tick is not publishing (age {{ $value }}s; -1 = never published)"
+          description: >-
+            Every ecom_* gauge below is stale or absent while this fires,
+            so their alerts are NOT firing either. Treat a quiet outbox
+            and a quiet webhook queue as unknown, not as healthy, until
+            this clears.
+
+      # ----- money ----------------------------------------------------
+      - alert: WebhooksExhausted
+        expr: ecom_webhooks_exhausted > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value }} gateway deliveries gave up"
+          description: >-
+            A capture among these is money taken against an order this
+            database still calls pending. Check /admin/webhooks.
+
+      - alert: OutboxStalled
+        expr: ecom_outbox_stalled > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} outbox messages claimed but never finished"
+          description: >-
+            A drainer died holding these. Every order confirmation behind
+            them is unsent. Check /admin/outbox.
+
+      - alert: StorageGcStalled
+        # Not the same signal as queue depth: a queue with depth is
+        # working, a queue with exhausted rows has stopped, and each of
+        # those is an object being billed for indefinitely.
+        expr: ecom_storage_gc_stalled > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} image objects gave up being collected"
+
+      # ----- traffic shape --------------------------------------------
+      - alert: ApiErrorRate
+        # Ratio, not a raw count: a fixed threshold pages on a traffic
+        # spike and stays quiet on a low-traffic outage.
+        expr: >-
+          sum(rate(http_requests_total{job="ecom-api",status=~"5.."}[5m]))
+          / sum(rate(http_requests_total{job="ecom-api"}[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of requests are 5xx"
+
+      - alert: ApiLatencyHigh
+        # By route, so one slow admin report does not hide behind a fast
+        # storefront. le is a string label; histogram_quantile needs the
+        # bucket dimension left in and everything else summed away.
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (route, le) (
+              rate(http_request_duration_seconds_bucket{job="ecom-api"}[5m])
+            )
+          ) > 2
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 on {{ $labels.route }} is {{ $value }}s"

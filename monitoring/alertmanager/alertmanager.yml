@@ -1,0 +1,49 @@
+# Where a firing rule actually goes.
+#
+# Deliberately unconfigured: the default receiver swallows alerts, so
+# this stack is safe to start before you have decided where to be paged.
+# It is ALSO useless until you fix that -- pick a receiver below.
+route:
+  # Group by alertname so five instances of ApiDown are one message.
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  # How often a STILL-FIRING alert repeats. The API's own ops alerts
+  # dedupe on unread (see raise_ops_alert); this is the same idea with a
+  # clock instead, and 4h is long enough not to become the outage.
+  repeat_interval: 4h
+  receiver: default
+
+  routes:
+    # Critical repeats sooner. Everything else inherits the 4h above.
+    - matchers: [severity="critical"]
+      receiver: default
+      repeat_interval: 1h
+
+receivers:
+  - name: default
+    # PICK ONE and delete this comment.
+    #
+    # webhook_configs:
+    #   - url: https://hooks.slack.com/services/...
+    #
+    # email_configs:
+    #   - to: ops@example.com
+    #     from: alerts@example.com
+    #     smarthost: smtp.example.com:587
+    #     auth_username: ...
+    #     auth_password: ...
+    #
+    # Telegram, PagerDuty, Opsgenie and ntfy are all first-class here too.
+
+inhibit_rules:
+  # ApiDown makes every other alert about that instance noise.
+  - source_matchers: [alertname="ApiDown"]
+    target_matchers: [severity=~"warning|critical"]
+    equal: [instance]
+
+  # OpsSnapshotStale means the gauge alerts cannot be trusted -- see the
+  # header in rules.yml. Suppress them rather than letting a stale zero
+  # read as good news.
+  - source_matchers: [alertname="OpsSnapshotStale"]
+    target_matchers: [alertname=~"WebhooksExhausted|OutboxStalled|StorageGcStalled"]

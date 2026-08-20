@@ -1,0 +1,53 @@
+// Ships every container's stdout on this host to Loki.
+//
+// Alloy rather than Promtail: Promtail went EOL in March 2026 and takes
+// no further fixes. This is the supported replacement and reads the same
+// Docker socket.
+//
+// It discovers containers instead of requiring the API to use a Loki log
+// driver, so nothing about the Dokploy-managed service definition has to
+// change to get its logs in here.
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+// Two labels, on purpose.
+//
+// Every distinct label combination is a separate Loki stream, and Loki
+// punishes label cardinality the way Prometheus does -- the failure mode
+// is the log system falling over during the incident you installed it
+// for. The API logs pino JSON, so level, req_id, route and the rest are
+// all reachable at query time with `| json` and cost nothing at ingest.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  // Docker reports names with a leading slash.
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // stdout vs stderr. pino writes to stdout, so a line on stderr from
+  // the API is something that bypassed the logger entirely -- a crash
+  // trace, usually, which is exactly what you want separable.
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  labels     = { job = "docker" }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

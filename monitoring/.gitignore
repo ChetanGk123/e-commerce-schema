@@ -1,0 +1,8 @@
+# The scrape token -- same value as METRICS_TOKEN on the API.
+# Ignore the contents, keep the directory, or the compose bind mount
+# creates it as a directory on first run and Prometheus fails to read it.
+secrets/*
+!secrets/.gitkeep
+
+# Holds GRAFANA_PASSWORD. .env.example is the committed one.
+.env

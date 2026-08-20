@@ -1,0 +1,21 @@
+# Provisioned, not clicked. A Grafana someone configured through the UI
+# is a Grafana nobody can rebuild after the volume is lost.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Matches global.scrape_interval, so $__rate_interval resolves to
+      # something that actually has samples in it.
+      timeInterval: 15s
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100

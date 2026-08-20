@@ -1,0 +1,39 @@
+# Scrapes the API's /metrics and evaluates rules.yml against it.
+#
+# The token is a FILE, not an inline value. Prometheus does not expand
+# environment variables in this file -- there is no $METRICS_TOKEN
+# substitution to reach for -- so the only ways to supply it are to write
+# it here in plaintext or to point at a file. The file is gitignored;
+# this config is not.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [alertmanager:9093]
+
+scrape_configs:
+  # job_name matches what apps/api/src/env.ts documents, so the alert
+  # expressions below and that comment stay talking about the same thing.
+  - job_name: ecom-api
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/metrics_token
+    static_configs:
+      # Container name and port on dokploy-network. PORT defaults to 3001
+      # in apps/api/src/env.ts. No ${VAR} here on purpose -- see above,
+      # Prometheus would take it literally and fail to resolve it. Edit
+      # this line if the service is named something else.
+      - targets: [api:3001]
+
+  # Prometheus watching itself, so "the thing that pages you" failing is
+  # not the one failure nothing notices.
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

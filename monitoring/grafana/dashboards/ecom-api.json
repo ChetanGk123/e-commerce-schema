@@ -1,0 +1,156 @@
+{
+  "uid": "ecom-api",
+  "title": "E-commerce API",
+  "tags": ["ecom"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "container",
+        "label": "Container",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": { "label": "container", "refId": "LokiVariableQueryEditor-VariableQuery", "type": 1 },
+        "current": { "text": "api", "value": "api" },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    { "type": "row", "title": "Is it up, and can you believe the gauges", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "type": "stat", "title": "API",
+      "description": "Prometheus `up`. Says nothing about the public path through Traefik.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [{ "refId": "A", "expr": "up{job=\"ecom-api\"}" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "up", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }, "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "Ops snapshot age",
+      "description": "READ THIS FIRST. The gauges in the Ops row come from the jobs tick, not from the scrape. If this is red or 'never published', the tick is not publishing and every one of them is stale or absent -- an empty webhook panel then means 'unknown', not 'fine'.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 4, "y": 1 },
+      "targets": [{ "refId": "A", "expr": "ecom_ops_snapshot_age_seconds" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "mappings": [{ "type": "value", "options": { "-1": { "text": "never published", "color": "red", "index": 0 } } }],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 120 }, { "color": "red", "value": 300 }] }
+        }, "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "5xx rate",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 9, "y": 1 },
+      "targets": [{ "refId": "A", "expr": "sum(rate(http_requests_total{job=\"ecom-api\",status=~\"5..\"}[$__rate_interval])) / clamp_min(sum(rate(http_requests_total{job=\"ecom-api\"}[$__rate_interval])), 0.0001)" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.01 }, { "color": "red", "value": 0.05 }] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "p95 latency (all routes)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 1 },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"ecom-api\"}[$__rate_interval])))" }],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 2 }] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "stat", "title": "req/s",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 1 },
+      "targets": [{ "refId": "A", "expr": "sum(rate(http_requests_total{job=\"ecom-api\"}[$__rate_interval]))" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 2 }, "overrides": [] },
+      "options": { "colorMode": "none", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+
+    { "type": "row", "title": "Traffic", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 } },
+    {
+      "type": "timeseries", "title": "Requests by route",
+      "description": "route is the registered pattern, never the path -- see metrics.ts on why.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [{ "refId": "A", "expr": "sum by (route) (rate(http_requests_total{job=\"ecom-api\"}[$__rate_interval]))", "legendFormat": "{{route}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 8, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } }
+    },
+    {
+      "type": "timeseries", "title": "p95 by route",
+      "description": "le must survive the sum or histogram_quantile has no buckets to interpolate over.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [{ "refId": "A", "expr": "histogram_quantile(0.95, sum by (route, le) (rate(http_request_duration_seconds_bucket{job=\"ecom-api\"}[$__rate_interval])))", "legendFormat": "{{route}}" }],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } }
+    },
+    {
+      "type": "timeseries", "title": "Responses by status",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 14 },
+      "targets": [{ "refId": "A", "expr": "sum by (status) (rate(http_requests_total{job=\"ecom-api\"}[$__rate_interval]))", "legendFormat": "{{status}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" }, "showPoints": "never" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+
+    { "type": "row", "title": "Ops -- published by the jobs tick, NOT read at scrape time", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 } },
+    {
+      "type": "timeseries", "title": "Outbox by status",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 22 },
+      "targets": [{ "refId": "A", "expr": "ecom_outbox_messages", "legendFormat": "{{status}}" }],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] }
+    },
+    {
+      "type": "timeseries", "title": "Money at risk",
+      "description": "webhooks_exhausted is the expensive one: a capture among those is money taken against an order still marked pending.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 22 },
+      "targets": [
+        { "refId": "A", "expr": "ecom_webhooks_exhausted", "legendFormat": "exhausted" },
+        { "refId": "B", "expr": "ecom_webhooks_unprocessed", "legendFormat": "unprocessed" },
+        { "refId": "C", "expr": "ecom_outbox_stalled", "legendFormat": "outbox stalled" }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 10, "showPoints": "never" } },
+        "overrides": [{ "matcher": { "id": "byName", "options": "exhausted" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }]
+      }
+    },
+    {
+      "type": "timeseries", "title": "Storage GC and lockouts",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 22 },
+      "targets": [
+        { "refId": "A", "expr": "ecom_storage_gc_queued", "legendFormat": "gc queued" },
+        { "refId": "B", "expr": "ecom_storage_gc_stalled", "legendFormat": "gc stalled" },
+        { "refId": "C", "expr": "ecom_auth_lockouts_active", "legendFormat": "lockouts" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 10, "showPoints": "never" } }, "overrides": [] }
+    },
+
+    { "type": "row", "title": "Logs", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 } },
+    {
+      "type": "logs", "title": "Warnings and errors",
+      "description": "pino levels are numeric: 40 warn, 50 error, 60 fatal. Nothing is extracted at ingest, so every other field -- req_id, route, err -- is one `| json` away.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 30 },
+      "targets": [{ "refId": "A", "expr": "{container=~\"$container\"} | json | level >= 40", "queryType": "range" }],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true }
+    }
+  ]
+}

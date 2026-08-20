@@ -1,0 +1,50 @@
+# Single-binary Loki on local disk.
+#
+# Sized for one small store, not for a fleet: filesystem storage, no
+# object store, no clustering. If this outgrows the host, the thing to
+# change is storage_config, not the shape of the deployment.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Docker timestamps can arrive slightly out of order across containers;
+  # rejecting those loses exactly the lines you want during an incident.
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  # 31 days. Long enough to investigate a chargeback, short enough that
+  # the disk is predictable.
+  retention_period: 744h
+
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: filesystem
+  retention_enabled: true
+
+# Off. It phones home on an interval and this stack has no reason to.
+analytics:
+  reporting_enabled: false

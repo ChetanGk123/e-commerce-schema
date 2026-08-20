@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: ecom
+    folder: ""
+    type: file
+    # The dashboard is a file in git, so a change to it is reviewable.
+    # Editing it in the UI works for exploring; the edit is lost on the
+    # next restart unless it comes back here.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
