@@ -94,11 +94,18 @@ describe("the ops gauges", () => {
       webhooksUnprocessed: 2,
       webhooksExhausted: 0,
       authLockouts: 7,
+      storageGcQueued: 12,
+      storageGcStalled: 2,
     });
 
     expect(find('ecom_outbox_messages{status="queued"}')[0]).toContain(" 3");
     expect(find("ecom_outbox_stalled")[0]).toBe("ecom_outbox_stalled 1");
     expect(find("ecom_auth_lockouts_active")[0]).toBe("ecom_auth_lockouts_active 7");
+
+    // Depth and stalled are separate series on purpose: a queue with
+    // depth is working, a queue with exhausted rows has stopped.
+    expect(find("ecom_storage_gc_queued")[0]).toBe("ecom_storage_gc_queued 12");
+    expect(find("ecom_storage_gc_stalled")[0]).toBe("ecom_storage_gc_stalled 2");
 
     const age = value(find("ecom_ops_snapshot_age_seconds")[0]!);
     expect(age).toBeGreaterThanOrEqual(0);

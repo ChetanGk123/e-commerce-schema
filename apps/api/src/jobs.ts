@@ -358,6 +358,8 @@ async function checkOps(): Promise<void> {
     webhooksUnprocessed: 0,
     webhooksExhausted: 0,
     authLockouts: 0,
+    storageGcQueued: 0,
+    storageGcStalled: 0,
   };
 
   const outbox = await db.rpc("outbox_health");
@@ -453,6 +455,39 @@ async function checkOps(): Promise<void> {
       "Several accounts are locked out at once",
       `${accounts} accounts hit the sign-in lockout. One person forgets their password; this many at once is a credential list being replayed. The accounts are in auth_attempts. Nothing is breached -- the lockout held -- but any customer among them cannot sign in for fifteen minutes and may call about it.`,
       { accounts },
+    );
+  }
+
+  // Images nobody points at any more. Depth on its own is not a
+  // problem -- a queue that is working has depth -- so the alert is on
+  // the rows that ran out of attempts, which is a queue that has stopped
+  // and objects being billed for indefinitely.
+  const gcQueued = await db
+    .from("storage_gc_queue")
+    .select("id", { count: "exact", head: true });
+  const gcStalled = await db
+    .from("storage_gc_queue")
+    .select("id", { count: "exact", head: true })
+    .gte("attempts", GC_GIVE_UP);
+
+  if (gcQueued.error || gcStalled.error) {
+    log.error(
+      { err: (gcQueued.error ?? gcStalled.error)?.message },
+      "jobs.ops_check_failed",
+    );
+    return;
+  }
+  snapshot.storageGcQueued = gcQueued.count ?? 0;
+  snapshot.storageGcStalled = gcStalled.count ?? 0;
+
+  if (snapshot.storageGcStalled > 0) {
+    log.error({ stalled: snapshot.storageGcStalled }, "ops.storage_gc_stalled");
+    await alert(
+      db,
+      "ops_storage_gc_stalled",
+      "Images cannot be removed from storage",
+      `${snapshot.storageGcStalled} object(s) gave up after ${GC_GIVE_UP} attempts. Each one is a file nothing displays and the bucket still bills for. The rows are in storage_gc_queue with the reason in last_error -- usually credentials or a bucket that no longer exists.`,
+      { stalled: snapshot.storageGcStalled },
     );
   }
 

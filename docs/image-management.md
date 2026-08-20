@@ -229,13 +229,17 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
   - *Acceptance*: a queued path is gone from the bucket within one tick; **a 404 from Storage
     counts as success** — the object being absent is the desired end state
 
-- [ ] **T3. Validate `variant_id` before spending an upload** — `apps/api/src/routes/admin-catalog.ts`
+- [x] **T3. Validate `variant_id` before spending an upload** — **done**, `apps/api/src/routes/admin-catalog.ts`
   - The product is already checked. Do the same for the variant, so case 3 stops being a
     routine orphan and becomes only a genuine crash
   - *Acceptance*: a `variant_id` belonging to another product answers 422 with **no object
     stored**
 
-- [ ] **T4. Ops alert when the queue backs up** — `apps/api/src/jobs.ts`
+- [x] **T4. Ops alert when the queue backs up** — **done**, `apps/api/src/jobs.ts`
+  - **Alerting on depth would have been wrong.** A queue with depth is a queue that is
+    working. The alert is on rows that exhausted their attempts, which is a queue that has
+    stopped — and every one of those is a file nothing displays that the bucket still
+    bills for. Both are published as metrics; only the second wakes anyone
   - `raise_ops_alert('ops_storage_gc_stalled', …)` when any row reaches `GC_MAX_ATTEMPTS`,
     alongside the existing four conditions
   - `ecom_storage_gc_queued` and `ecom_storage_gc_stalled` added to the metrics snapshot

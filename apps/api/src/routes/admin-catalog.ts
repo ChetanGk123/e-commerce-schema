@@ -1047,6 +1047,27 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
       });
     }
 
+    // Before the upload, not after (T3). The composite foreign key would
+    // refuse this variant anyway -- but by then the bytes are in the
+    // bucket with no row to point at them, and the only thing that would
+    // ever collect them is a reconciler that does not exist yet.
+    const variantId = form.get("variantId");
+    if (typeof variantId === "string" && variantId) {
+      const variant = await caller.db
+        .from("product_variants")
+        .select("id")
+        .eq("id", variantId)
+        .eq("product_id", id)
+        .maybeSingle();
+      throwOnDbError(variant.error);
+      if (!variant.data) {
+        throw new HTTPException(422, {
+          message: "That variant belongs to a different product.",
+          cause: { code: "cross_product_variant" },
+        });
+      }
+    }
+
     const bytes = new Uint8Array(await file.arrayBuffer());
     const kind = sniffImageType(bytes);
     if (!kind) {
@@ -1061,7 +1082,6 @@ export const adminImagesRoute = new OpenAPIHono({ defaultHook: validationHook })
 
     const { url } = await uploadImage(id, bytes, kind);
 
-    const variantId = form.get("variantId");
     const position = Number(form.get("position") ?? 0);
     const altText = form.get("altText");
 

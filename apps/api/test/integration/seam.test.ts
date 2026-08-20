@@ -2210,11 +2210,23 @@ describe.skipIf(!up)("the collection queue drains", () => {
 describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let storage: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: any;
+  const STAFF_ID = "bbbbbbbb-0000-4000-8000-000000000001";
 
   beforeAll(async () => {
     const kong = startKongStandIn();
     await configureEnv(kong.url);
     storage = await import("../../src/storage");
+    ({ app } = await import("../../src/app"));
+
+    await sql(`
+      insert into auth.users (id, email) values ('${STAFF_ID}', 'staff@test.local')
+        on conflict (id) do nothing;
+      insert into staff_users (id, email, role, full_name, is_active) values
+        ('${STAFF_ID}', 'staff@test.local', 'owner', 'Owner', true)
+        on conflict (id) do update set role = 'owner', is_active = true;
+    `);
   });
 
   test("a successful delete is gone", async () => {
@@ -2232,6 +2244,45 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     // The reason has to survive into last_error, or the queue fills with
     // rows nobody can diagnose.
     expect(res.detail).toContain("500");
+  });
+
+  test("a variant from another product is refused before anything is stored", async () => {
+    // T3. The composite foreign key would refuse the insert anyway --
+    // but by then the bytes are in the bucket with no row to point at
+    // them, and nothing would ever collect them: the trigger only fires
+    // on a row that existed.
+    const OTHER = "11111111-0000-4000-8000-00000000ff04";
+    const MINE = "11111111-0000-4000-8000-00000000ff05";
+    const OTHER_VARIANT = "11111111-0000-4000-8000-00000000ff06";
+    await sql(`
+      insert into products (id, slug, name, status) values
+        ('${MINE}',  'gc-mine',  'Mine',  'active'),
+        ('${OTHER}', 'gc-other', 'Other', 'active')
+        on conflict (id) do nothing;
+      insert into product_variants (id, product_id, sku, price, status)
+        values ('${OTHER_VARIANT}', '${OTHER}', 'GC-OTHER-1', 100, 'active')
+        on conflict (id) do nothing;
+    `);
+
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0])]),
+      "x.jpg",
+    );
+    form.append("variantId", OTHER_VARIANT);
+
+    const res = await app.request(`/admin/products/${MINE}/images`, {
+      method: "POST",
+      body: form,
+      headers: { Authorization: `Bearer ${await mintToken("authenticated", STAFF_ID)}` },
+    });
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "cross_product_variant",
+    );
+
+    await sql(`delete from products where id in ('${MINE}', '${OTHER}')`);
   });
 
   test("a URL from another host resolves to no object at all", async () => {

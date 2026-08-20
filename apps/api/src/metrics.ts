@@ -90,6 +90,8 @@ interface OpsSnapshot {
   webhooksUnprocessed: number;
   webhooksExhausted: number;
   authLockouts: number;
+  storageGcQueued: number;
+  storageGcStalled: number;
 }
 
 let ops: OpsSnapshot | null = null;
@@ -162,6 +164,15 @@ export function render(): string {
       "# HELP ecom_auth_lockouts_active Accounts currently locked out of sign-in.",
       "# TYPE ecom_auth_lockouts_active gauge",
       `ecom_auth_lockouts_active ${ops.authLockouts}`,
+      "# HELP ecom_storage_gc_queued Image objects waiting to be collected.",
+      "# TYPE ecom_storage_gc_queued gauge",
+      `ecom_storage_gc_queued ${ops.storageGcQueued}`,
+      // Not the same signal. A queue with depth is working; a queue with
+      // exhausted rows has stopped, and every one of those is an object
+      // being billed for indefinitely.
+      "# HELP ecom_storage_gc_stalled Objects that gave up after exhausting their attempts.",
+      "# TYPE ecom_storage_gc_stalled gauge",
+      `ecom_storage_gc_stalled ${ops.storageGcStalled}`,
     );
   }
 
