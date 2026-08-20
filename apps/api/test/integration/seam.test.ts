@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 
 import {
   ALLOWED_ORIGIN,
+  BUCKET_KEYS,
   OUTAGE_PASSWORD,
   PGRST_URL,
   STORAGE_PUBLIC_URL,
@@ -2197,6 +2198,55 @@ describe.skipIf(!up)("the collection queue drains", () => {
     expect(await sqlValue("select url from storage_gc_queue")).toBe("https://img.test/kept.jpg");
     expect(await sqlValue("select last_error from storage_gc_queue")).toBe("500 storage said no");
   });
+
+  test("referenced_objects names both columns that hold image URLs", async () => {
+    // T5. The reconciler removes what is NOT in here, unattended,
+    // against a bucket with no backup -- so a column this forgets is a
+    // column whose images get collected. Both are asserted by name
+    // rather than by count, because a count passes when one replaces
+    // the other.
+    const PROD = "11111111-0000-4000-8000-00000000ff07";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-ref', 'GC Ref', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position)
+        values ('${PROD}', 'https://img.test/from-product.jpg', 0);
+      insert into collections (name, slug, image_url, position)
+        values ('GC Coll', 'gc-coll', 'https://img.test/from-collection.jpg', 0)
+        on conflict (slug) do update set image_url = excluded.image_url;
+    `);
+
+    const refs = (
+      await sqlValue("select string_agg(url, ',' order by url) from referenced_objects()")
+    ).split(",");
+    expect(refs).toContain("https://img.test/from-product.jpg");
+    expect(refs).toContain("https://img.test/from-collection.jpg");
+
+    await sql(`
+      delete from products where id = '${PROD}';
+      delete from collections where slug = 'gc-coll';
+    `);
+  });
+
+  test("one URL on two rows is one reference, not two", async () => {
+    // union rather than union all. The caller only ever asks "is this in
+    // use", and a duplicate would make a set comparison quietly wrong.
+    const PROD = "11111111-0000-4000-8000-00000000ff08";
+    await sql(`
+      insert into products (id, slug, name, status)
+        values ('${PROD}', 'gc-dup-ref', 'GC Dup', 'active') on conflict (id) do nothing;
+      insert into product_images (product_id, url, position) values
+        ('${PROD}', 'https://img.test/twice.jpg', 0),
+        ('${PROD}', 'https://img.test/twice.jpg', 1);
+    `);
+    expect(
+      await sqlValue(
+        "select count(*) from referenced_objects() where url = 'https://img.test/twice.jpg'",
+      ),
+    ).toBe("1");
+
+    await sql(`delete from products where id = '${PROD}'`);
+  });
 });
 
 /**
@@ -2283,6 +2333,17 @@ describe.skipIf(!up)("storage deletion tells apart gone from failed", () => {
     );
 
     await sql(`delete from products where id in ('${MINE}', '${OTHER}')`);
+  });
+
+  test("listing the bucket recurses into folders", async () => {
+    // T6, and the reason it is a task at all. Storage's list is
+    // delimiter based: given `products/` it returns one entry per
+    // product folder with a null id, and none of the files inside. A
+    // walk that stops there reports a bucket with no images -- which,
+    // handed to something that removes what nothing references, is not a
+    // wrong report but a wrong deletion.
+    const found = (await storage.listObjects()) as { path: string }[];
+    expect(found.map((f) => f.path).sort()).toEqual([...BUCKET_KEYS].sort());
   });
 
   test("a URL from another host resolves to no object at all", async () => {

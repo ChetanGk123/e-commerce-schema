@@ -247,18 +247,26 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
 
 ### Phase 2 — find the orphans nothing recorded
 
-- [ ] **T5. `referenced_objects()`** — migration
+- [x] **T5. `referenced_objects()`** — **done**, `supabase/migrations/20260801003100_referenced_objects.sql`
   - Every object path the database still points at, across all three columns
   - Uses the same path-extraction helper as T1, so the trigger and the reconciler can never
     disagree about what a URL means
   - *Acceptance*: a known uploaded path appears; a `collections.image_url` pointing at an
     external CDN does not
 
-- [ ] **T6. `listObjects()` in `storage.ts`**
+- [x] **T6. `listObjects()` in `storage.ts`** — **done**
   - Paginated wrapper over `POST /storage/v1/object/list/{bucket}`, returning path and
     `created_at`
   - **Must page** — the default limit is 100 and a real catalog is not
-  - *Acceptance*: a bucket with 250 objects returns 250
+  - **And must recurse, which the task did not say.** Storage's list is delimiter-based:
+    given `products/` it returns one entry per product folder with a **null `id`** and none
+    of the files inside them. A walk that stops there reports a bucket containing no
+    images — which, handed to something that removes what nothing references, is not a
+    wrong report but a wrong deletion, and it would trip rail 4 rather than being caught
+    honestly. Costs one request per folder; the alternative is R2 credentials in this
+    process for a recursive `ListObjectsV2`
+  - *Acceptance*: **met.** The stand-in models the folder behaviour rather than returning
+    keys flat, so a non-recursive walk fails the test instead of passing it
 
 - [ ] **T7. The reconciler, two-pass** — migration + `apps/api/src/routes/jobs.ts`
   - `storage_orphan_sightings`: `path text pk`, `first_seen_at timestamptz`,

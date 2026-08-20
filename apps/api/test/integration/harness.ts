@@ -106,6 +106,30 @@ export function startKongStandIn(): { url: string; stop: () => void } {
       // key decides the answer, so a test can ask for "gone", "was never
       // there" and "storage is having a bad afternoon" and check that
       // only the last one is worth retrying.
+      // Listing, modelled the way Storage actually behaves: delimiter
+      // based, one level at a time, folders coming back as entries with
+      // a null id. A stand-in that returned every key flat would let a
+      // broken recursive walk pass.
+      if (url.pathname.startsWith("/storage/v1/object/list/")) {
+        const { prefix } = (await req.json()) as { prefix: string };
+        const seen = new Set<string>();
+        const entries: unknown[] = [];
+        const at = prefix ? `${prefix}/` : "";
+
+        for (const key of BUCKET_KEYS) {
+          if (!key.startsWith(at)) continue;
+          const rest = key.slice(at.length);
+          const slash = rest.indexOf("/");
+          if (slash === -1) {
+            entries.push({ name: rest, id: `id-${key}`, created_at: BUCKET_CREATED_AT });
+          } else if (!seen.has(rest.slice(0, slash))) {
+            seen.add(rest.slice(0, slash));
+            entries.push({ name: rest.slice(0, slash), id: null, created_at: null });
+          }
+        }
+        return Response.json(entries, { status: 200 });
+      }
+
       if (url.pathname.startsWith("/storage/v1/object/")) {
         if (url.pathname.includes("missing")) {
           return Response.json({ error: "Object not found" }, { status: 404 });
@@ -141,6 +165,19 @@ export const ALLOWED_ORIGIN = "https://store.test";
 
 /** Stands in for the R2 custom domain. Image URLs are built from this. */
 export const STORAGE_PUBLIC_URL = "https://img.test";
+
+/**
+ * What the stand-in bucket contains. Nested two deep like the real keys,
+ * so a listing that forgets to recurse finds folders and no files.
+ */
+export const BUCKET_KEYS = [
+  "products/p1/kept.jpg",
+  "products/p1/orphan.jpg",
+  "products/p2/deep.jpg",
+];
+
+/** Old enough to clear any age threshold a test does not want to fight. */
+export const BUCKET_CREATED_AT = "2020-01-01T00:00:00.000Z";
 
 export async function configureEnv(kongUrl: string): Promise<void> {
   process.env.SUPABASE_URL = kongUrl;
