@@ -31,9 +31,9 @@ include:
 
 services:
   api:
-    # apps/api is the only executable workspace -- packages/schema and
-    # packages/client are libraries with no start script and nothing to
-    # run, so neither has a Dockerfile.
+    # One of the two executable workspaces -- apps/admin is the other.
+    # packages/schema and packages/client are libraries with no start script
+    # and nothing to run, so neither has a Dockerfile.
     build:
       # Context is the REPO ROOT even though the Dockerfile lives in
       # apps/api: @ecom/schema is a workspace sibling and bun install has
@@ -117,6 +117,47 @@ services:
     # rather than limping; `restart: unless-stopped` turns that into a
     # retry instead of a dead container.
     restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  admin:
+    # The second executable workspace. Next runs on NODE, not Bun -- the bun
+    # image ships a `node` shim that segfaults loading Next's precompiled
+    # Turbopack runtime, so apps/admin/Dockerfile uses a node base and
+    # borrows bun only to install.
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+      target: dev
+    volumes:
+      - .:/repo
+      # Same reasoning as the api service, with one addition. The IMAGE
+      # installs hoisted (npm-style, everything at /repo/node_modules) so
+      # Next's standalone tracing works; the HOST installs isolated, bun's
+      # default. Shadowing both paths keeps the container on the image's
+      # layout instead of a half-and-half of the two.
+      - /repo/node_modules
+      - /repo/apps/admin/node_modules
+      - /repo/apps/api/node_modules
+      - /repo/packages/schema/node_modules
+      - /repo/packages/client/node_modules
+      # Build output is per-layout too, and sharing it with the host means
+      # `next dev` and a host-side `bun run build` overwrite each other.
+      - /repo/apps/admin/.next
+    ports:
+      # 3000, which apps/api/.env.example's CORS_ORIGINS has always assumed.
+      - "3000:3000"
+    environment:
+      # Server-side, container-to-container. A browser cannot resolve this,
+      # which is why it is not NEXT_PUBLIC_.
+      API_URL: http://api:3001
+      APP_URL: http://localhost:3000
+    networks:
+      default:
+      dokploy-network:
+        aliases:
+          - ${COMPOSE_PROJECT_NAME:-ecom}-admin
+    restart: unless-stopped
+
 
 networks:
   # The Supabase project's own network. `supabase_default` locally, where

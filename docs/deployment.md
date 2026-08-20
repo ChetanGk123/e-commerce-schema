@@ -67,7 +67,13 @@ SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_JWT_SECRET=
 METRICS_TOKEN=
 GRAFANA_PASSWORD=
+ADMIN_URL=
 ```
+
+`ADMIN_URL` is the admin console's own public address. Next uses it for
+`metadataBase`, so canonical and OG links resolve absolutely instead of to
+localhost. There is no sensible default for someone else's domain, so it
+is guarded like the rest.
 
 `.env.prod.example` is this list in full, with the optional ones below it.
 
