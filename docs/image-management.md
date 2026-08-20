@@ -342,7 +342,18 @@ Numbered for reference, roughly in dependency order. Migration numbers continue 
   - `is distinct from`, not `<>`: clearing a picture to null is exactly the case that
     orphans an object, and `<>` answers null there
   - External URLs still work through `PATCH /admin/collections/{id}` and are untouched
-- [ ] **T11. Retire `invoices.pdf_url`** — decision 2 settled this by removing the feature:
+- [x] **T11. Retire `invoices.pdf_url`** — **done, and smaller than proposed**
+  (`supabase/migrations/20260801003500_pdf_url_unused.sql`). The misleading half is gone:
+  `routes/invoicing.ts` no longer publishes `pdfUrl`, so no client is told there is a file
+  to fetch. **The column stays**, with a `comment on column` saying why.
+  *Dropping it was the wrong trade.* It is named in `protect_invoice()`'s `mutable_fields`,
+  in that function's error message, and in two invariants that exist specifically to prove
+  a filed invoice is immutable *except* there. Removing it means editing the guard on GST
+  legal records and deleting invariants — a wide, delicate change whose entire benefit is
+  the absence of an always-null column. And the decision is reversible in a way the column
+  is not free to recreate: archiving signed e-invoice PDFs is a plausible statutory
+  requirement, and if it arrives, this column and its existing exemption are exactly right.
+  *Original note kept for context:* decision 2 settled this by removing the feature:
   invoices are rendered as HTML and printed by the browser, so no PDF is ever stored. That
   leaves a column nothing writes and `routes/invoicing.ts` still reads and publishes as
   `pdfUrl`, which tells every client there is a file to fetch. Either drop the column in a

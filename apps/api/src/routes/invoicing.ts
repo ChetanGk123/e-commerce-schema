@@ -50,7 +50,6 @@ const Invoice = z
     sgstTotal: z.number(),
     igstTotal: z.number(),
     grandTotal: z.number(),
-    pdfUrl: z.string().nullable(),
     /** Null until the IRP answers. Once set, the whole stamp is final. */
     irn: z.string().nullable(),
     ackNo: z.string().nullable(),
@@ -75,7 +74,6 @@ interface InvoiceRow {
   sgst_total: number;
   igst_total: number;
   grand_total: number;
-  pdf_url: string | null;
   irn: string | null;
   ack_no: string | null;
   ack_date: string | null;
@@ -99,7 +97,7 @@ interface InvoiceRow {
 // signed_qr is deliberately absent: it is a long opaque blob that
 // belongs on a printed invoice, not in every list response.
 const INVOICE_SELECT =
-  "id, invoice_number, order_id, kind, parent_invoice_id, customer_name, customer_gstin, seller_gstin, place_of_supply, taxable_value, cgst_total, sgst_total, igst_total, grand_total, pdf_url, irn, ack_no, ack_date, issued_at, orders!inner(order_number), invoice_lines(id, description, hsn_code, quantity, unit_price, taxable_value, gst_rate, cgst_amount, sgst_amount, igst_amount, line_total)";
+  "id, invoice_number, order_id, kind, parent_invoice_id, customer_name, customer_gstin, seller_gstin, place_of_supply, taxable_value, cgst_total, sgst_total, igst_total, grand_total, irn, ack_no, ack_date, issued_at, orders!inner(order_number), invoice_lines(id, description, hsn_code, quantity, unit_price, taxable_value, gst_rate, cgst_amount, sgst_amount, igst_amount, line_total)";
 
 const n = (v: number) => Number(v);
 
@@ -119,7 +117,6 @@ const shape = (i: InvoiceRow) => ({
   sgstTotal: n(i.sgst_total),
   igstTotal: n(i.igst_total),
   grandTotal: n(i.grand_total),
-  pdfUrl: i.pdf_url,
   irn: i.irn,
   ackNo: i.ack_no,
   ackDate: i.ack_date,
