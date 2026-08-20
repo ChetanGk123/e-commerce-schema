@@ -7,6 +7,8 @@ import Link from "next/link";
 
 import { CirclePlus, Command, Mail } from "lucide-react";
 
+import type { StaffRole } from "@ecom/schema/enums";
+
 import { Button } from "@/components/ui/button";
 import {
   Sidebar,
@@ -23,6 +25,7 @@ import { APP_CONFIG } from "@/config/app-config";
 import { sidebarItems, sidebarSecondaryItems } from "@/constants";
 import { rootUser } from "@/data/users";
 import { useCloseMobileSidebar } from "@/hooks/use-close-mobile-sidebar";
+import { filterNavByRole } from "@/lib/nav";
 
 import { NavMain } from "./nav-main";
 import { NavSecondary } from "./nav-secondary";
@@ -54,7 +57,19 @@ function QuickCreate() {
   );
 }
 
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
+  /**
+   * The signed-in staff member's role, from the server layout.
+   *
+   * A plain string on purpose: this is a client component (the nav data
+   * carries lucide icon components, which cannot cross the boundary), so the
+   * role comes in as a serializable prop and the filtering happens here.
+   */
+  role: StaffRole;
+}
+
+export function AppSidebar({ role, ...props }: AppSidebarProps) {
+  const items = filterNavByRole(sidebarItems, role);
   const closeMobileSidebar = useCloseMobileSidebar();
 
   return (
@@ -73,7 +88,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         <QuickCreate />
-        <NavMain items={sidebarItems} />
+        <NavMain items={items} />
         <NavSecondary items={sidebarSecondaryItems} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>

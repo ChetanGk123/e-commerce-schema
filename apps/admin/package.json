@@ -21,6 +21,8 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
+    "@ecom/client": "workspace:*",
+    "@ecom/schema": "workspace:*",
     "@hookform/resolvers": "^5.7.1",
     "@shadcn/react": "^0.3.0",
     "@tanstack/react-query": "^5.101.4",
@@ -45,8 +47,7 @@
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
     "vaul": "^1.1.2",
-    "zod": "^3.25.0",
-    "@ecom/schema": "workspace:*"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.7",
