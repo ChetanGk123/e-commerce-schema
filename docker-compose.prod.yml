@@ -1,0 +1,137 @@
+# Deployment override, for Dokploy.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# In Dokploy: set the compose file to both, in that order. See
+# docs/deployment.md for which variables go in the Environment tab.
+#
+# WHAT THIS CHANGES, and why the base file cannot just be used as-is:
+#
+#   The base is development-shaped on purpose. It builds the `dev` stage,
+#   bind-mounts the working tree over /repo and runs `bun --hot`. Deployed
+#   unchanged that ships hot reload and whatever happens to be checked out
+#   into production, which is not a thing to find out later.
+#
+#   It also publishes ports on the host. Here Traefik fronts everything, so
+#   publishing is at best redundant and at worst an unauthenticated Grafana
+#   on a public interface.
+#
+# `!reset` empties a list the base set. Compose MERGES sequences by
+# appending, so `volumes: []` alone would leave the base's four entries in
+# place -- the tag is the only way to actually remove them.
+
+services:
+  api:
+    build:
+      # The bundled single file that CI builds and this repo has always
+      # deployed. No hot reload, which is the point.
+      target: runtime
+
+    # The whole reason the dev stage exists. Gone here: the image carries
+    # its own dependencies and its own built artifact.
+    volumes: !reset []
+
+    # Traefik reaches this over dokploy-network. Nothing needs a host port,
+    # and Dokploy attaches the domain from its UI -- it generates the router
+    # labels itself, which is why none are written here.
+    ports: !reset []
+
+    environment:
+      # FIXED, not configurable. Inside dokploy-network Supabase is always
+      # http://kong:8000. Putting this in the Environment tab invites the
+      # public https://supabase.<domain> instead, which sends internal
+      # traffic out through Traefik and back -- slower, and it breaks when
+      # TLS or public DNS does. docs/setup.md:400 draws the same line.
+      SUPABASE_URL: http://kong:8000
+
+      # Plain JSON to stdout, no pino-pretty worker.
+      NODE_ENV: production
+
+      # The four env.ts has no default for: it validates at import and the
+      # container exits rather than starting half-configured. `:?` fails the
+      # deploy at `compose up` instead, with the variable's name, which is a
+      # better place to find out.
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?set it in Dokploy's Environment tab}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?set it in Dokploy's Environment tab}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?set it in Dokploy's Environment tab}
+
+      # Everything below has a default in env.ts, so each is only needed
+      # once you turn that feature on. Listed rather than left implicit:
+      # this block is the contract of what the service actually reads, and
+      # `:-` keeps an unset one absent rather than an empty string, which is
+      # NOT the same thing to a zod optional().
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      MAIL_PROVIDER: ${MAIL_PROVIDER:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-}
+      STORAGE_PUBLIC_URL: ${STORAGE_PUBLIC_URL:-}
+      JOBS_SECRET: ${JOBS_SECRET:-}
+      DOCS_PUBLIC: ${DOCS_PUBLIC:-false}
+      # No :- here. The base file already guards this one as required,
+      # and a softer default beside it would only be misleading.
+      METRICS_TOKEN: ${METRICS_TOKEN}
+
+    labels:
+      # The only Traefik label the Supabase template sets on kong either.
+      # Dokploy writes the router and service labels from the domain you
+      # configure; hand-writing them here would fight it.
+      - traefik.docker.network=dokploy-network
+
+  # ------------------------------------------------------------------
+  prometheus:
+    # THE TOKEN PROBLEM.
+    #
+    # prometheus.yml reads the scrape token from a FILE, because Prometheus
+    # does no environment interpolation in its config at all. A platform
+    # that hands you environment variables therefore cannot configure it,
+    # and monitoring/secrets/metrics_token is gitignored so it is not on the
+    # deploy host either.
+    #
+    # So write the file at boot from the variable. /etc/prometheus is
+    # writable by the image's `nobody` user -- checked, not assumed. `exec`
+    # keeps Prometheus as PID 1 so it still receives signals, and "$@"
+    # passes through the flags the base file sets as `command`, rather than
+    # duplicating them here where they would drift.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - printf '%s' "$$METRICS_TOKEN" > /etc/prometheus/metrics_token && exec /bin/prometheus "$$@"
+      - prometheus
+    environment:
+      METRICS_TOKEN: ${METRICS_TOKEN:?the API and Prometheus must share one value}
+    # Drops the bind mount of the host secrets file, which does not exist
+    # here, and re-adds only the config the base mounted.
+    #
+    # !override, NOT !reset. `!reset` empties the node and discards whatever
+    # follows it -- which silently deploys Prometheus with no config at all,
+    # and the container starts. `!override` is the one that replaces.
+    volumes: !override
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus-data:/prometheus
+
+  # ------------------------------------------------------------------
+  grafana:
+    # No host port. This is the one service worth exposing, and Traefik
+    # should be what does it -- Prometheus, Alertmanager and Loki have no
+    # authentication of their own and must stay off any public interface.
+    ports: !reset []
+    networks:
+      - monitoring
+      - dokploy-network
+    labels:
+      - traefik.docker.network=dokploy-network
+    environment:
+      # Read only when Grafana first initialises its volume. Changing it
+      # later does nothing until the volume is destroyed -- so set it before
+      # the first deploy, not after.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set it before the first deploy}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-}

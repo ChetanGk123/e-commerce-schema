@@ -21,7 +21,10 @@
 # monitoring/docker-compose.yml is `include`d rather than copied, because it
 # still has to run standalone on a host where this file does not exist.
 
-name: ecom
+# Per environment, because container names are built from it. Four
+# environments on one host all called `ecom` collide on `ecom-api-1`.
+# Dokploy sets this per application; the default is for local work.
+name: ${COMPOSE_PROJECT_NAME:-ecom}
 
 include:
   - path: monitoring/docker-compose.yml
@@ -60,8 +63,14 @@ services:
     ports:
       - "3001:3001"
     env_file:
-      # Real keys live here and are gitignored. Values below override it.
-      - apps/api/.env
+      # Local development only. Gitignored, so it does not exist on a deploy
+      # host -- required:false is what lets the same base file be reused
+      # there, where docker-compose.prod.yml supplies the values from the
+      # platform's environment instead. Without it, Compose aborts on a
+      # missing file and the prod override cannot undo that: env_file lists
+      # MERGE, they do not replace.
+      - path: apps/api/.env
+        required: false
     environment:
       # Container-to-container. apps/api/.env says localhost:8000, which is
       # correct for `bun run dev` on the host and wrong from inside a
@@ -78,19 +87,29 @@ services:
       # Turns on GET /metrics. Same value as monitoring/secrets/metrics_token,
       # which Prometheus reads -- Prometheus cannot take a token from the
       # environment, so the one secret genuinely does need two homes.
-      METRICS_TOKEN: ${METRICS_TOKEN:?run the token step in docs/development.md}
+      METRICS_TOKEN: ${METRICS_TOKEN:?required -- Prometheus needs the same value. docs/development.md (local) or docs/deployment.md (deploy)}
 
     networks:
-      # default reaches Supabase (kong, db, ...). dokploy-network is where
-      # Prometheus looks: monitoring/docker-compose.yml pins it to
-      # [monitoring, api], and a service that names ANY network stops
-      # joining the default one -- so without this the scrape resolves
-      # nothing and the target sits down while the API is perfectly fine.
+      default:
+      # THE ENVIRONMENT'S OWN SUPABASE, addressed over that project's
+      # network rather than the shared one.
       #
-      # It also happens to be the production topology: on Dokploy, kong and
-      # the API are both on dokploy-network.
-      - default
-      - dokploy-network
+      # This is the difference between one environment and several. `kong`
+      # is a network ALIAS, and aliases are not unique -- stand up qa, uat
+      # and prod Supabase stacks and all three claim `kong` on
+      # dokploy-network, where Docker then answers round-robin. The QA API
+      # reaches the production database some of the time, which is worse
+      # than failing because it mostly works.
+      #
+      # Each Supabase project has its own default network, so naming that
+      # one is unambiguous by construction.
+      supabase:
+      dokploy-network:
+        # Traefik ingress, and how a SHARED monitoring stack finds this
+        # API. Same aliasing problem, same fix: `api` would be claimed by
+        # every environment, so publish one that carries the project name.
+        aliases:
+          - ${COMPOSE_PROJECT_NAME:-ecom}-api
 
     # No `depends_on: kong` any more -- kong belongs to another compose
     # project and Compose can only wait on services in its own. env.ts
@@ -100,8 +119,16 @@ services:
     restart: unless-stopped
 
 networks:
-  # Declared by the included Supabase compose too; repeated here because a
-  # service cannot join a network this file has not named.
+  # The Supabase project's own network. `supabase_default` locally, where
+  # the project is named `supabase`; per environment it is
+  # `supabase-qa_default` and so on. External: Supabase is deployed
+  # separately and this file must not try to create it.
+  supabase:
+    name: ${SUPABASE_NETWORK:-supabase_default}
+    external: true
+
+  # Ingress only. Declared by the Supabase compose too; repeated here
+  # because a service cannot join a network this file has not named.
   dokploy-network:
     name: ${MONITORING_API_NETWORK:-dokploy-network}
     external: true

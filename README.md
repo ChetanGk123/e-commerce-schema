@@ -104,6 +104,7 @@ supabase/
     01_invariants.sql   87 assertions
 docker-compose.yml      the API with hot reload, plus monitoring. Supabase
                         runs separately — see docs/development.md
+docker-compose.prod.yml override for deploying — see docs/deployment.md
 monitoring/             Prometheus, Loki, Grafana — see docs/monitoring.md
 packages/
   schema/               @ecom/schema — TypeScript types, enums and zod
