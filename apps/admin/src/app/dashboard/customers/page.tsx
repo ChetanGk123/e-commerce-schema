@@ -1,3 +1,5 @@
+import { ROLES } from "@ecom/schema/enums";
+
 import { api } from "@/lib/api";
 import { readApiError } from "@/lib/api-error";
 import { requireRole } from "@/lib/auth";
@@ -24,7 +26,7 @@ export default async function CustomersPage({
   // Support can read customers; warehouse cannot -- it sees no PII beyond a
   // shipping address. The nav hides this for them too, but hiding a link is
   // not a check: this is.
-  await requireRole(["owner", "admin", "manager", "support"]);
+  await requireRole([ROLES.OWNER, ROLES.ADMIN, ROLES.MANAGER, ROLES.SUPPORT]);
 
   const params = parseListParams(await searchParams);
 

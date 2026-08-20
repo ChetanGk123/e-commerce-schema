@@ -1,5 +1,7 @@
 import { Contact, LayoutDashboard, Settings, Users } from "lucide-react";
 
+import { ROLES } from "@ecom/schema/enums";
+
 import type { NavGroup, NavMainLinkItem } from "@/types";
 
 export const sidebarItems: NavGroup[] = [
@@ -27,7 +29,7 @@ export const sidebarItems: NavGroup[] = [
         // shipping address, per the role map in docs/admin-plan.md. The page
         // enforces the same list -- this only avoids offering a door that
         // will not open.
-        roles: ["owner", "admin", "manager", "support"],
+        roles: [ROLES.OWNER, ROLES.ADMIN, ROLES.MANAGER, ROLES.SUPPORT],
       },
     ],
   },

@@ -1,3 +1,4 @@
+import { ROLES } from "@ecom/schema/enums";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 
@@ -75,7 +76,7 @@ const list = createRoute({
   description:
     "The full catalogue, whether or not it has been customised. `customised: false` means the copy shown is the built-in and no row exists for it yet.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner", "admin")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER, ROLES.ADMIN)] as const,
   responses: {
     200: {
       description: "Templates, by key",
@@ -93,7 +94,7 @@ const getOne = createRoute({
   tags: ["admin", "email"],
   summary: "One template, with the variables it can use",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner", "admin")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER, ROLES.ADMIN)] as const,
   request: { params: z.object({ key: z.string() }) },
   responses: {
     200: { description: "The template", content: { "application/json": { schema: Template } } },
@@ -110,7 +111,7 @@ const save = createRoute({
   description:
     "Upserts the override. Only keys the service actually sends are accepted -- inventing one would produce a template nothing ever renders and no way to notice.\n\nA body that drops a required variable is refused by name. Saving a password reset with no `{{code}}` in it would send customers an email they cannot act on, and nothing downstream would report a problem.\n\nThe subject is one header line; a newline in it is refused by the database, for every caller including the service key.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner", "admin")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER, ROLES.ADMIN)] as const,
   request: {
     params: z.object({ key: z.string() }),
     body: {
@@ -147,7 +148,7 @@ const revert = createRoute({
   description:
     "Deletes the override. The email keeps sending -- it goes back to the copy shipped with the service, which is why there is no way to end up with no template at all.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner", "admin")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER, ROLES.ADMIN)] as const,
   request: { params: z.object({ key: z.string() }) },
   responses: {
     200: { description: "Reverted", content: { "application/json": { schema: Template } } },
@@ -164,7 +165,7 @@ const preview = createRoute({
   description:
     "Renders with sample values, or with `payload` if you send one. Nothing is queued and nothing is sent.\n\nSend `subject` and `body` to preview an unsaved draft -- which is the point: the alternative is saving it and finding out from a customer.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner", "admin")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER, ROLES.ADMIN)] as const,
   request: {
     params: z.object({ key: z.string() }),
     body: {

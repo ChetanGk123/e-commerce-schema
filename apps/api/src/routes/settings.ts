@@ -1,3 +1,4 @@
+import { ROLES } from "@ecom/schema/enums";
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 
 import { requireAuth, requireRole, requireStaff } from "../auth";
@@ -121,7 +122,7 @@ const update = createRoute({
   description:
     "Owner and admin only. `seller_gstin` and `seller_state_code` appear on every invoice this store issues, and invoices are immutable once written -- a wrong value is not something a later edit can repair, so both are format-checked here and must agree with each other.\\n\\n`cod_enabled: false` turns cash on delivery off at checkout for the whole store.\\n\\n`config` is not writable through this API. See the route source for why.",
   security: [{ bearerAuth: [] }],
-  middleware: [requireAuth, requireStaff, requireRole("owner", "admin")] as const,
+  middleware: [requireAuth, requireStaff, requireRole(ROLES.OWNER, ROLES.ADMIN)] as const,
   request: { body: { content: { "application/json": { schema: SettingsPatch } } } },
   responses: {
     200: { description: "Updated", content: { "application/json": { schema: Settings } } },
