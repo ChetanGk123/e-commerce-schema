@@ -140,6 +140,23 @@ export type CreditReason = (typeof CREDIT_REASONS)[number];
 export const STAFF_ROLES = ['owner', 'admin', 'manager', 'support', 'warehouse'] as const;
 export type StaffRole = (typeof STAFF_ROLES)[number];
 
+/**
+ * The same five, by name.
+ *
+ * `ROLES.SUPPORT` over `'support'` at call sites: a typo in a string is a
+ * silently narrower guard that still compiles wherever the parameter is
+ * `string`, and reads as intentional in review. `satisfies` keeps this
+ * honest -- add a role to STAFF_ROLES without adding it here and this stops
+ * compiling, rather than quietly offering four of five.
+ */
+export const ROLES = {
+  OWNER: 'owner',
+  ADMIN: 'admin',
+  MANAGER: 'manager',
+  SUPPORT: 'support',
+  WAREHOUSE: 'warehouse',
+} as const satisfies Record<Uppercase<StaffRole>, StaffRole>;
+
 /** order_events.actor_type + ticket_messages.sender_type (same trio) */
 export const ACTOR_TYPES = ['system', 'customer', 'staff'] as const;
 export type ActorType = (typeof ACTOR_TYPES)[number];

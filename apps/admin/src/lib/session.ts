@@ -61,3 +61,15 @@ export async function writeSession(session: Session): Promise<void> {
 export async function clearSession(): Promise<void> {
   (await cookies()).delete(COOKIE);
 }
+
+/**
+ * True when the access token is close enough to expiring to be worth
+ * swapping before the next call.
+ *
+ * A 60s skew, not zero: a token that expires while the request is in flight
+ * fails, and the whole point is to not make the user find out.
+ */
+export function isExpiring(session: Session, skewSeconds = 60): boolean {
+  if (session.expiresAt === null) return false;
+  return session.expiresAt - skewSeconds <= Math.floor(Date.now() / 1000);
+}
